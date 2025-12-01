@@ -10,10 +10,15 @@ Features:
 - News sentiment analysis (VADER, TextBlob, FinBERT)
 - High-performance backtesting via VectorBT
 - Long/short position support
+- Advanced features (regime detection, fractal, momentum factors)
+- Alternative data (Reddit sentiment, SEC filings)
+- Institutional strategy ensemble
+- Walk-forward validation
 
 Usage:
     python main.py --symbol AAPL --mode backtest
     python main.py --symbol TSLA --mode live --fetch-news
+    python main.py --symbol MSFT --mode walkforward
 """
 
 import argparse
@@ -32,9 +37,19 @@ from config import XGBoostParams, LightGBMParams, EnsembleParams
 from data.fetchers import MarketDataFetcher, NewsFetcher
 from data.preprocessors import DataCleaner
 from features import TechnicalFeatures, StatisticalFeatures, SentimentFeatures
+from features import AdvancedFeatures, OptionsFeatures, MacroFeatures
 from models.ml import GradientBoostingModels, EnsembleModel, EnsembleConfig
 from signals import SignalGenerator, SignalConfig
 from backtesting import BacktestEngine, BacktestConfig, BacktestResult
+from backtesting import WalkForwardBacktest, MonteCarloValidator, WalkForwardResult
+from strategies import (
+    StrategyEnsemble,
+    MomentumStrategy,
+    MeanReversionStrategy,
+    BreakoutStrategy,
+    RegimeSwitchingStrategy,
+)
+from data.alternative import RedditSentimentFetcher, SECFetcher
 
 # Configure logging
 logging.basicConfig(
@@ -56,9 +71,11 @@ class TradingEngine:
     1. Fetch market data and news
     2. Clean and preprocess data
     3. Generate technical, statistical, and sentiment features
-    4. Train/load ML models
-    5. Generate trading signals
-    6. Backtest or execute signals
+    4. Add advanced features (regime, fractal, momentum factors)
+    5. Integrate alternative data (Reddit, SEC)
+    6. Train/load ML models
+    7. Generate trading signals via strategy ensemble
+    8. Backtest or execute signals
     
     Example:
         >>> engine = TradingEngine()
@@ -97,16 +114,21 @@ class TradingEngine:
         self.technical_features = None
         self.statistical_features = None
         self.sentiment_features = None
+        self.advanced_features = None
+        self.reddit_fetcher = None
+        self.sec_fetcher = None
         self.ml_model = None
         self.signal_generator = None
+        self.strategy_ensemble = None
         self.backtest_engine = None
+        self.walk_forward_engine = None
         
         # State
         self.is_initialized = False
         self.model_path = Path("models/saved")
         self.model_path.mkdir(parents=True, exist_ok=True)
     
-    def initialize(self, fetch_news: bool = True):
+    def initialize(self, fetch_news: bool = True, use_alternative_data: bool = True):
         """Initialize all components."""
         logger.info("Initializing trading engine components...")
         
@@ -142,6 +164,28 @@ class TradingEngine:
                 finbert_weight=0.4,
             )
         
+        # Advanced features (institutional-grade)
+        self.advanced_features = AdvancedFeatures()
+        
+        # Alternative data sources
+        if use_alternative_data:
+            try:
+                self.reddit_fetcher = RedditSentimentFetcher()
+                logger.info("Reddit sentiment fetcher initialized")
+            except Exception as e:
+                logger.warning(f"Reddit fetcher not available: {e}")
+                self.reddit_fetcher = None
+            
+            try:
+                self.sec_fetcher = SECFetcher()
+                logger.info("SEC filings fetcher initialized")
+            except Exception as e:
+                logger.warning(f"SEC fetcher not available: {e}")
+                self.sec_fetcher = None
+        
+        # Strategy ensemble (institutional-grade)
+        self.strategy_ensemble = StrategyEnsemble()
+        
         # Backtesting
         self.backtest_engine = BacktestEngine(
             config=BacktestConfig(
@@ -151,6 +195,13 @@ class TradingEngine:
                 position_size=self.trading_settings.max_position_pct,
                 allow_shorting=self.trading_settings.allow_shorting,
             )
+        )
+        
+        # Walk-forward backtesting
+        self.walk_forward_engine = WalkForwardBacktest(
+            train_period=252,  # 1 year training
+            test_period=63,    # 3 months testing
+            step_size=21,      # Roll monthly
         )
         
         self.is_initialized = True
@@ -219,6 +270,8 @@ class TradingEngine:
         self,
         price_data: pd.DataFrame,
         news_data: Dict = None,
+        symbol: str = None,
+        use_alternative_data: bool = True,
     ) -> pd.DataFrame:
         """
         Prepare all features for ML model.
@@ -226,6 +279,8 @@ class TradingEngine:
         Args:
             price_data: OHLCV data
             news_data: News articles by date
+            symbol: Stock symbol for alternative data
+            use_alternative_data: Whether to add Reddit/SEC data
             
         Returns:
             DataFrame with all features
@@ -251,6 +306,32 @@ class TradingEngine:
         if news_data and self.sentiment_features:
             df = self.sentiment_features.add_sentiment_features(df, news_data)
             logger.info(f"Added sentiment features: {df.shape[1]} columns")
+        
+        # Add advanced institutional features
+        if self.advanced_features:
+            try:
+                df = self.advanced_features.add_all_advanced_features(df)
+                logger.info(f"Added advanced features: {df.shape[1]} columns")
+            except Exception as e:
+                logger.warning(f"Could not add advanced features: {e}")
+        
+        # Add alternative data features
+        if use_alternative_data and symbol:
+            # Reddit sentiment
+            if self.reddit_fetcher:
+                try:
+                    df = self.reddit_fetcher.get_wsb_sentiment_features(df, symbol)
+                    logger.info(f"Added Reddit sentiment features: {df.shape[1]} columns")
+                except Exception as e:
+                    logger.warning(f"Could not add Reddit features: {e}")
+            
+            # SEC filings
+            if self.sec_fetcher:
+                try:
+                    df = self.sec_fetcher.get_sec_features(df, symbol)
+                    logger.info(f"Added SEC filing features: {df.shape[1]} columns")
+                except Exception as e:
+                    logger.warning(f"Could not add SEC features: {e}")
         
         # Create target variable (next day return direction)
         df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
@@ -320,6 +401,7 @@ class TradingEngine:
         self,
         df: pd.DataFrame,
         symbol: str,
+        use_strategy_ensemble: bool = True,
     ) -> pd.DataFrame:
         """
         Generate trading signals.
@@ -327,6 +409,7 @@ class TradingEngine:
         Args:
             df: DataFrame with features
             symbol: Stock symbol
+            use_strategy_ensemble: Whether to use institutional strategy ensemble
             
         Returns:
             DataFrame with signals
@@ -348,9 +431,48 @@ class TradingEngine:
             config=signal_config,
         )
         
-        # Generate signals
+        # Generate ML-based signals
         signals = self.signal_generator.generate_signals(df, symbol=symbol)
         signals_df = self.signal_generator.signals_to_dataframe(signals)
+        
+        # Enhance with strategy ensemble if enabled
+        if use_strategy_ensemble and self.strategy_ensemble:
+            try:
+                # Generate signals for each row
+                ensemble_results = []
+                for idx in range(len(df)):
+                    try:
+                        result = self.strategy_ensemble.generate_ensemble_signal(df, idx)
+                        ensemble_results.append(result)
+                    except Exception:
+                        ensemble_results.append({
+                            'direction': 0,
+                            'strength': 0,
+                            'confidence': 0,
+                        })
+                
+                # Create ensemble signals dataframe
+                ensemble_signals = pd.DataFrame(ensemble_results)
+                
+                # Merge with ML signals
+                if 'strength' in ensemble_signals.columns:
+                    signals_df = signals_df.reset_index(drop=True)
+                    
+                    # Combine: weight ML 60%, strategy ensemble 40%
+                    ml_strength = signals_df['signal_value'].values[:len(ensemble_signals)]
+                    strategy_strength = ensemble_signals['strength'].fillna(0).values
+                    strategy_direction = ensemble_signals['direction'].fillna(0).values
+                    
+                    # Combine signal with direction
+                    strategy_signal = strategy_strength * strategy_direction
+                    combined_strength = 0.6 * ml_strength + 0.4 * strategy_signal[:len(ml_strength)]
+                    signals_df['combined_signal'] = combined_strength
+                    signals_df['strategy_signal'] = strategy_signal[:len(ml_strength)]
+                    
+                    logger.info("Strategy ensemble signals integrated")
+                    
+            except Exception as e:
+                logger.warning(f"Could not integrate strategy ensemble: {e}")
         
         # Summary
         summary = self.signal_generator.get_signal_summary(signals)
@@ -375,13 +497,27 @@ class TradingEngine:
         """
         logger.info("Running backtest...")
         
-        # Extract signal values
-        signals = signals_df['signal_value'].values
+        # Extract signal values (use combined if available)
+        if 'combined_signal' in signals_df.columns:
+            raw_signals = signals_df['combined_signal'].values
+        else:
+            raw_signals = signals_df['signal_value'].values
+        
+        # Convert to discrete signals: 1 (buy), -1 (sell), 0 (hold)
+        # Use thresholds to determine signal
+        buy_threshold = 0.1
+        sell_threshold = -0.1
+        
+        signals = np.zeros(len(raw_signals))
+        signals[raw_signals > buy_threshold] = 1
+        signals[raw_signals < sell_threshold] = -1
         
         # Align data
         min_len = min(len(price_data), len(signals))
         price_data = price_data.iloc[:min_len]
         signals = signals[:min_len]
+        
+        logger.info(f"Signal distribution: Buy={np.sum(signals == 1)}, Sell={np.sum(signals == -1)}, Hold={np.sum(signals == 0)}")
         
         # Run backtest
         result = self.backtest_engine.run(
@@ -394,6 +530,114 @@ class TradingEngine:
         
         return result
     
+    def walk_forward_backtest(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+    ) -> WalkForwardResult:
+        """
+        Run walk-forward backtest with rolling optimization.
+        
+        This provides more realistic performance estimates by
+        continuously re-training on past data and testing on future data.
+        
+        Args:
+            df: DataFrame with features
+            symbol: Stock symbol
+            
+        Returns:
+            WalkForwardResult
+        """
+        logger.info("Running walk-forward backtest...")
+        
+        def signal_func(data: pd.DataFrame) -> pd.Series:
+            """Generate signals for a data window."""
+            # Get feature columns
+            feature_cols = [c for c in data.columns if c not in [
+                'open', 'high', 'low', 'close', 'volume', 'target', 'date'
+            ]]
+            
+            if self.ml_model and hasattr(self.ml_model, 'predict_proba'):
+                # Use ML model probabilities
+                X = data[feature_cols]
+                probs = self.ml_model.predict_proba(X)
+                signals = (probs - 0.5) * 2  # Scale to -1 to 1
+            else:
+                # Fallback to simple momentum
+                signals = np.sign(data['close'].pct_change(5))
+            
+            return pd.Series(signals, index=data.index)
+        
+        def backtest_func(data: pd.DataFrame, signals: pd.Series) -> Dict:
+            """Run backtest on a window."""
+            try:
+                result = self.backtest_engine.run(
+                    prices=data,
+                    signals=signals.values,
+                )
+                return {
+                    'total_return': result.total_return,
+                    'sharpe_ratio': result.sharpe_ratio,
+                    'total_trades': result.total_trades,
+                }
+            except Exception as e:
+                logger.debug(f"Backtest error: {e}")
+                return {
+                    'total_return': 0,
+                    'sharpe_ratio': 0,
+                    'total_trades': 0,
+                }
+        
+        def optimize_func(train_data: pd.DataFrame) -> Dict:
+            """Optimize parameters on training data."""
+            # Re-train model on training data
+            feature_cols = [c for c in train_data.columns if c not in [
+                'open', 'high', 'low', 'close', 'volume', 'target', 'date'
+            ]]
+            
+            if 'target' in train_data.columns:
+                X = train_data[feature_cols]
+                y = train_data['target']
+                
+                if len(X) > 100:  # Minimum samples for training
+                    # Quick training with reduced parameters
+                    config = EnsembleConfig(
+                        use_xgb=True,
+                        use_lgb=True,
+                        use_catboost=False,  # Skip for speed
+                        use_random_forest=False,
+                        use_stacking=False,
+                        task='classification',
+                    )
+                    
+                    self.ml_model = EnsembleModel(config=config)
+                    self.ml_model.fit(X, y)
+            
+            return {}
+        
+        # Run walk-forward analysis
+        result = self.walk_forward_engine.run(
+            df=df,
+            signal_func=signal_func,
+            backtest_func=backtest_func,
+            optimize_func=optimize_func,
+        )
+        
+        # Print summary
+        self.walk_forward_engine.print_summary(result)
+        
+        # Run Monte Carlo validation
+        if result.all_trades is not None and len(result.all_trades) > 0:
+            validator = MonteCarloValidator(n_simulations=1000)
+            validation = validator.validate_trades(result.all_trades)
+            
+            logger.info(f"\n📊 Monte Carlo Validation:")
+            logger.info(f"  Significant: {validation['is_significant']}")
+            logger.info(f"  P-Value: {validation['p_value']:.4f}")
+            logger.info(f"  95% CI: ({validation['confidence_interval'][0]:.2f}, {validation['confidence_interval'][1]:.2f})")
+        
+        return result
+    
     def run(
         self,
         symbol: str,
@@ -401,6 +645,7 @@ class TradingEngine:
         start_date: datetime = None,
         end_date: datetime = None,
         fetch_news: bool = True,
+        use_alternative_data: bool = True,
         train_model: bool = True,
         save_model: bool = True,
         plot_results: bool = True,
@@ -410,10 +655,11 @@ class TradingEngine:
         
         Args:
             symbol: Stock symbol to analyze
-            mode: 'backtest' or 'live'
+            mode: 'backtest', 'live', or 'walkforward'
             start_date: Start date for data
             end_date: End date for data
             fetch_news: Whether to fetch news data
+            use_alternative_data: Whether to use Reddit/SEC data
             train_model: Whether to train a new model
             save_model: Whether to save the trained model
             plot_results: Whether to plot backtest results
@@ -425,7 +671,7 @@ class TradingEngine:
         
         # Initialize if needed
         if not self.is_initialized:
-            self.initialize(fetch_news=fetch_news)
+            self.initialize(fetch_news=fetch_news, use_alternative_data=use_alternative_data)
         
         # Fetch data
         data = self.fetch_data(
@@ -439,17 +685,19 @@ class TradingEngine:
         df = self.prepare_features(
             price_data=data['price_data'],
             news_data=data['news_data'],
+            symbol=symbol,
+            use_alternative_data=use_alternative_data,
         )
         
         # Train or load model
-        if train_model:
+        if train_model and mode != 'walkforward':
             self.train_model(df)
             
             if save_model:
                 model_path = self.model_path / f"{symbol}_model"
                 self.ml_model.save(str(model_path))
                 logger.info(f"Model saved to {model_path}")
-        else:
+        elif not train_model:
             # Try to load existing model
             model_path = self.model_path / f"{symbol}_model"
             if model_path.exists():
@@ -459,6 +707,20 @@ class TradingEngine:
             else:
                 logger.warning("No saved model found, training new model")
                 self.train_model(df)
+        
+        # Handle different modes
+        if mode == 'walkforward':
+            # Walk-forward backtesting
+            wf_result = self.walk_forward_backtest(df, symbol)
+            
+            return {
+                'symbol': symbol,
+                'mode': mode,
+                'data': data,
+                'features': df,
+                'walkforward_result': wf_result,
+                'backtest_result': None,
+            }
         
         # Generate signals
         signals_df = self.generate_signals(df, symbol)
@@ -484,6 +746,12 @@ class TradingEngine:
                 logger.info(f"  Stop Loss: ${latest_signal['stop_loss']:.2f}")
             if latest_signal['take_profit']:
                 logger.info(f"  Take Profit: ${latest_signal['take_profit']:.2f}")
+            
+            # Show strategy ensemble info if available
+            if 'dominant_strategy' in signals_df.columns:
+                logger.info(f"  Dominant Strategy: {latest_signal.get('dominant_strategy', 'N/A')}")
+            if 'market_regime' in signals_df.columns:
+                logger.info(f"  Market Regime: {latest_signal.get('market_regime', 'N/A')}")
         
         return {
             'symbol': symbol,
@@ -531,9 +799,9 @@ def main():
     parser.add_argument(
         '--mode', '-m',
         type=str,
-        choices=['backtest', 'live'],
+        choices=['backtest', 'live', 'walkforward'],
         default='backtest',
-        help='Running mode'
+        help='Running mode: backtest, live, or walkforward'
     )
     parser.add_argument(
         '--start-date',
@@ -571,6 +839,16 @@ def main():
         action='store_true',
         help='Disable plotting'
     )
+    parser.add_argument(
+        '--alternative-data',
+        action='store_true',
+        help='Fetch alternative data (Reddit, SEC filings)'
+    )
+    parser.add_argument(
+        '--no-alternative-data',
+        action='store_true',
+        help='Disable alternative data fetching'
+    )
     
     args = parser.parse_args()
     
@@ -582,6 +860,9 @@ def main():
     if args.end_date:
         end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
     
+    # Determine alternative data usage
+    use_alt_data = args.alternative_data and not args.no_alternative_data
+    
     # Run engine
     engine = TradingEngine()
     
@@ -591,6 +872,7 @@ def main():
         start_date=start_date,
         end_date=end_date,
         fetch_news=args.fetch_news,
+        use_alternative_data=use_alt_data,
         train_model=not args.no_train,
         plot_results=not args.no_plot,
     )

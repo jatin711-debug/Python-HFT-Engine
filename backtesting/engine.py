@@ -315,21 +315,31 @@ class BacktestEngine:
         
         # Handle max drawdown duration (can be Timedelta or numeric)
         max_dd_duration_raw = stats.get('Max Drawdown Duration', 0)
-        if hasattr(max_dd_duration_raw, 'days'):
-            max_dd_duration = int(max_dd_duration_raw.days)
-        elif max_dd_duration_raw is None or pd.isna(max_dd_duration_raw):
+        try:
+            if hasattr(max_dd_duration_raw, 'days'):
+                max_dd_duration = int(max_dd_duration_raw.days)
+            elif max_dd_duration_raw is None or pd.isna(max_dd_duration_raw):
+                max_dd_duration = 0
+            elif isinstance(max_dd_duration_raw, (int, float)) and not np.isnan(max_dd_duration_raw):
+                max_dd_duration = int(max_dd_duration_raw)
+            else:
+                max_dd_duration = 0
+        except (ValueError, TypeError):
             max_dd_duration = 0
-        else:
-            max_dd_duration = int(max_dd_duration_raw)
         
         # Handle avg trade duration (can be Timedelta or numeric)
         avg_trade_duration_raw = stats.get('Avg Winning Trade Duration', 0)
-        if hasattr(avg_trade_duration_raw, 'days'):
-            avg_trade_duration = float(avg_trade_duration_raw.days)
-        elif avg_trade_duration_raw is None or pd.isna(avg_trade_duration_raw):
+        try:
+            if hasattr(avg_trade_duration_raw, 'days'):
+                avg_trade_duration = float(avg_trade_duration_raw.days)
+            elif avg_trade_duration_raw is None or pd.isna(avg_trade_duration_raw):
+                avg_trade_duration = 0.0
+            elif isinstance(avg_trade_duration_raw, (int, float)) and not np.isnan(avg_trade_duration_raw):
+                avg_trade_duration = float(avg_trade_duration_raw)
+            else:
+                avg_trade_duration = 0.0
+        except (ValueError, TypeError):
             avg_trade_duration = 0.0
-        else:
-            avg_trade_duration = float(avg_trade_duration_raw)
         
         result = BacktestResult(
             total_return=float(stats.get('Total Return [%]', 0)) / 100,

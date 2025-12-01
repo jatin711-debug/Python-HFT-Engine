@@ -28,6 +28,9 @@ alpha-vantage>=2.3.1
 requests>=2.31.0
 aiohttp>=3.8.0
 
+# Alternative Data Sources
+praw>=7.7.0  # Reddit API
+
 # Sentiment Analysis / NLP
 nltk>=3.8.0
 textblob>=0.17.0
