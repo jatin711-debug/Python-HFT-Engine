@@ -17,6 +17,10 @@ import logging
 import pickle
 from pathlib import Path
 from datetime import datetime
+import warnings
+
+# Suppress sklearn feature name warnings (they are harmless)
+warnings.filterwarnings('ignore', message='.*does not have valid feature names.*')
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge

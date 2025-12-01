@@ -462,14 +462,26 @@ class TradingEngine:
                     ml_strength = signals_df['signal_value'].values[:len(ensemble_signals)]
                     strategy_strength = ensemble_signals['strength'].fillna(0).values
                     strategy_direction = ensemble_signals['direction'].fillna(0).values
+                    strategy_confidence = ensemble_signals['confidence'].fillna(0).values if 'confidence' in ensemble_signals.columns else np.ones_like(strategy_direction) * 0.5
                     
                     # Combine signal with direction
                     strategy_signal = strategy_strength * strategy_direction
                     combined_strength = 0.6 * ml_strength + 0.4 * strategy_signal[:len(ml_strength)]
+                    
+                    # Apply confidence filter - only trade when both ML and strategy agree
+                    # and have reasonable confidence
+                    agreement_bonus = np.sign(ml_strength) == np.sign(strategy_signal[:len(ml_strength)])
+                    combined_strength = combined_strength * (1 + 0.2 * agreement_bonus.astype(float))
+                    
+                    # Reduce signal when ML and strategy disagree
+                    combined_strength = combined_strength * (0.5 + 0.5 * agreement_bonus.astype(float))
+                    
                     signals_df['combined_signal'] = combined_strength
                     signals_df['strategy_signal'] = strategy_signal[:len(ml_strength)]
+                    signals_df['ml_strategy_agreement'] = agreement_bonus.astype(int)
                     
                     logger.info("Strategy ensemble signals integrated")
+                    logger.info(f"ML-Strategy agreement rate: {agreement_bonus.mean()*100:.1f}%")
                     
             except Exception as e:
                 logger.warning(f"Could not integrate strategy ensemble: {e}")
@@ -503,26 +515,101 @@ class TradingEngine:
         else:
             raw_signals = signals_df['signal_value'].values
         
+        # Get agreement filter if available
+        agreement = None
+        if 'ml_strategy_agreement' in signals_df.columns:
+            agreement = signals_df['ml_strategy_agreement'].values
+        
         # Convert to discrete signals: 1 (buy), -1 (sell), 0 (hold)
-        # Use thresholds to determine signal
-        buy_threshold = 0.1
-        sell_threshold = -0.1
+        # Use very selective thresholds - only trade on strong conviction
+        buy_threshold = 0.35   # Higher threshold for stronger signals
+        sell_threshold = -0.35
         
         signals = np.zeros(len(raw_signals))
         signals[raw_signals > buy_threshold] = 1
         signals[raw_signals < sell_threshold] = -1
         
-        # Align data
+        # Align data FIRST before applying filters
         min_len = min(len(price_data), len(signals))
-        price_data = price_data.iloc[:min_len]
+        price_data = price_data.iloc[:min_len].copy()
         signals = signals[:min_len]
+        if agreement is not None:
+            agreement = agreement[:min_len]
+        
+        # Apply agreement filter - only trade when ML and strategy agree
+        if agreement is not None:
+            # Reduce signals where there's disagreement
+            signals[agreement == 0] = 0
+            logger.info("Applied ML-Strategy agreement filter")
+        
+        # Add momentum confirmation filter
+        if len(price_data) > 20:
+            close = price_data['close'].values
+            
+            # RSI filter - avoid overbought/oversold trades against momentum
+            if 'rsi' in price_data.columns:
+                rsi = price_data['rsi'].values
+            else:
+                delta = pd.Series(close).diff()
+                gain = delta.where(delta > 0, 0).rolling(14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rsi = (100 - (100 / (1 + gain / (loss + 1e-10)))).values
+            
+            # Don't buy overbought or sell oversold
+            signals[(signals == 1) & (rsi > 70)] = 0   # No buys when overbought
+            signals[(signals == -1) & (rsi < 30)] = 0  # No shorts when oversold
+        
+        # Add trend filter: only trade in direction of longer-term trend
+        if len(price_data) > 50:
+            close = price_data['close'].values
+            sma_50 = pd.Series(close).rolling(50).mean().values
+            sma_20 = pd.Series(close).rolling(20).mean().values
+            
+            # Trend conditions
+            uptrend = (close > sma_50) & (sma_20 > sma_50)
+            downtrend = (close < sma_50) & (sma_20 < sma_50)
+            
+            # Only allow trades in clear trend direction
+            signals[(signals == -1) & uptrend] = 0   # No shorts in uptrend
+            signals[(signals == 1) & downtrend] = 0  # No longs in downtrend
+            logger.info("Applied trend filter")
+        
+        # Minimum holding period - prevent rapid switching
+        min_hold_bars = 5  # Hold for at least 5 bars
+        last_trade_bar = -min_hold_bars
+        for i in range(len(signals)):
+            if signals[i] != 0:
+                if i - last_trade_bar < min_hold_bars:
+                    signals[i] = 0  # Cancel signal if too soon
+                else:
+                    last_trade_bar = i
         
         logger.info(f"Signal distribution: Buy={np.sum(signals == 1)}, Sell={np.sum(signals == -1)}, Hold={np.sum(signals == 0)}")
         
-        # Run backtest
+        # Calculate ATR for dynamic stop loss
+        if 'high' in price_data.columns and 'low' in price_data.columns:
+            high = price_data['high'].values
+            low = price_data['low'].values
+            close = price_data['close'].values
+            tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+            atr = pd.Series(tr).rolling(14).mean().values
+            atr_pct = atr / close
+            # Tighter stops with better risk-reward
+            stop_loss = np.clip(1.5 * atr_pct, 0.01, 0.03)  # 1-3% based on ATR
+            take_profit = np.clip(4.0 * atr_pct, 0.02, 0.10)  # 2.5x risk-reward minimum
+            avg_sl = np.nanmean(stop_loss)
+            avg_tp = np.nanmean(take_profit)
+            logger.info(f"Dynamic stops: SL={avg_sl*100:.1f}%, TP={avg_tp*100:.1f}%")
+        else:
+            stop_loss = 0.015  # 1.5% default stop loss
+            take_profit = 0.06  # 6% default take profit (4:1 risk-reward)
+        
+        # Run backtest with risk management
         result = self.backtest_engine.run(
             prices=price_data,
             signals=signals,
+            stop_loss=stop_loss if isinstance(stop_loss, float) else avg_sl,
+            take_profit=take_profit if isinstance(take_profit, float) else avg_tp,
         )
         
         # Print summary

@@ -15,6 +15,11 @@ from typing import Dict, List, Optional, Tuple
 from scipy import stats
 from scipy.signal import argrelextrema
 import logging
+import warnings
+
+# Suppress LAPACK warnings that come from numpy operations
+warnings.filterwarnings('ignore', message='.*DLASCLS.*')
+warnings.filterwarnings('ignore', message='.*SVD did not converge.*')
 
 logger = logging.getLogger(__name__)
 
@@ -215,12 +220,25 @@ class AdvancedFeatures:
             if len(counts) < 2:
                 return 1.5
             
-            # Linear regression to get dimension
-            scales_log = [c[0] for c in counts]
-            counts_log = [c[1] for c in counts]
+            # Linear regression to get dimension (using robust method)
+            scales_log = np.array([c[0] for c in counts])
+            counts_log = np.array([c[1] for c in counts])
             
-            slope, _ = np.polyfit(scales_log, counts_log, 1)
-            return np.clip(-slope, 1, 2)
+            try:
+                # Use correlation-based slope calculation instead of polyfit
+                x_mean = np.mean(scales_log)
+                y_mean = np.mean(counts_log)
+                
+                numerator = np.sum((scales_log - x_mean) * (counts_log - y_mean))
+                denominator = np.sum((scales_log - x_mean) ** 2)
+                
+                if abs(denominator) < 1e-10:
+                    return 1.5
+                
+                slope = numerator / denominator
+                return np.clip(-slope, 1, 2)
+            except Exception:
+                return 1.5
         
         return series.rolling(window).apply(box_dim, raw=True)
     
@@ -379,6 +397,8 @@ class AdvancedFeatures:
         
         Detects overbought/oversold conditions and reversion probability.
         """
+        import warnings
+        
         close = df['close']
         returns = close.pct_change()
         
@@ -392,24 +412,54 @@ class AdvancedFeatures:
             df[f'mr_probability_{window}'] = 1 - stats.norm.cdf(abs(df[f'zscore_{window}']))
         
         # Ornstein-Uhlenbeck parameters (mean reversion speed)
-        # Simplified estimation
+        # Simplified estimation using robust method
         for window in [50, 100]:
             price_diff = close.diff()
             price_lag = close.shift(1)
             
             def estimate_ou_theta(y, x):
-                if len(y) < 10 or np.std(x) == 0:
-                    return 0
-                slope, _ = np.polyfit(x, y, 1)
-                return -slope  # Mean reversion speed
+                """Estimate OU mean reversion speed with robust error handling."""
+                try:
+                    # Filter out NaN values
+                    mask = ~(np.isnan(y) | np.isnan(x))
+                    y_clean = y[mask]
+                    x_clean = x[mask]
+                    
+                    if len(y_clean) < 10:
+                        return 0.0
+                    
+                    x_std = np.std(x_clean)
+                    if x_std == 0 or np.isnan(x_std):
+                        return 0.0
+                    
+                    # Use simple correlation-based estimate instead of polyfit
+                    # This is more numerically stable
+                    x_mean = np.mean(x_clean)
+                    y_mean = np.mean(y_clean)
+                    
+                    numerator = np.sum((x_clean - x_mean) * (y_clean - y_mean))
+                    denominator = np.sum((x_clean - x_mean) ** 2)
+                    
+                    if abs(denominator) < 1e-10:
+                        return 0.0
+                    
+                    slope = numerator / denominator
+                    return -slope  # Mean reversion speed
+                    
+                except Exception:
+                    return 0.0
             
-            df[f'ou_theta_{window}'] = pd.Series(
-                [estimate_ou_theta(
-                    price_diff.iloc[max(0, i-window):i].values,
-                    price_lag.iloc[max(0, i-window):i].values
-                ) for i in range(len(df))],
-                index=df.index
-            )
+            # Suppress LAPACK warnings during calculation
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                
+                df[f'ou_theta_{window}'] = pd.Series(
+                    [estimate_ou_theta(
+                        price_diff.iloc[max(0, i-window):i].values,
+                        price_lag.iloc[max(0, i-window):i].values
+                    ) for i in range(len(df))],
+                    index=df.index
+                )
         
         # RSI divergence (price makes new high but RSI doesn't)
         # Calculate RSI
