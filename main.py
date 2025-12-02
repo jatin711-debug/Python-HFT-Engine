@@ -51,7 +51,7 @@ from strategies import (
 )
 from data.alternative import RedditSentimentFetcher, SECFetcher
 
-# Configure logging
+# Configure logging (must be before HFT import which uses logger)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,6 +61,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# HFT Integration (optional - for research/paper trading)
+try:
+    from signals.unified_signal_aggregator import UnifiedSignalAggregator, AggregatorConfig
+    from strategies.hft_strategies import HFTStrategyEnsemble
+    HFT_AVAILABLE = True
+except ImportError:
+    HFT_AVAILABLE = False
+    logger.warning("HFT strategies not available - install dependencies or check imports")
 
 
 class TradingEngine:
@@ -122,6 +131,10 @@ class TradingEngine:
         self.strategy_ensemble = None
         self.backtest_engine = None
         self.walk_forward_engine = None
+        
+        # HFT Integration
+        self.unified_aggregator = None
+        self.use_hft = False
         
         # State
         self.is_initialized = False
@@ -207,6 +220,51 @@ class TradingEngine:
         self.is_initialized = True
         logger.info("Trading engine initialized successfully")
     
+    def initialize_hft(self, use_hft: bool = True):
+        """
+        Initialize HFT strategies module.
+        
+        Call this after initialize() and train_model() if you want HFT integration.
+        HFT strategies are optional and provide additional signals for:
+        - Statistical arbitrage
+        - LOB imbalance detection
+        - Market making signals
+        - Entry/exit timing optimization
+        
+        Args:
+            use_hft: Whether to enable HFT strategies
+        """
+        if not HFT_AVAILABLE:
+            logger.warning("HFT module not available - skipping HFT initialization")
+            return
+        
+        if not self.is_initialized:
+            logger.warning("Engine not initialized - call initialize() first")
+            return
+        
+        try:
+            # Create unified aggregator with ML model
+            config = AggregatorConfig(
+                ml_weight=0.35,
+                institutional_weight=0.35,
+                hft_weight=0.30,
+                require_agreement=True,
+                min_agreement_score=0.5,
+            )
+            
+            self.unified_aggregator = UnifiedSignalAggregator(
+                ml_model=self.ml_model,
+                config=config,
+                use_hft=use_hft,
+            )
+            
+            self.use_hft = use_hft
+            logger.info(f"HFT strategies initialized (enabled={use_hft})")
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize HFT strategies: {e}")
+            self.use_hft = False
+    
     def fetch_data(
         self,
         symbol: str,
@@ -247,7 +305,7 @@ class TradingEngine:
             try:
                 articles = self.news_fetcher.fetch_news(
                     symbol=symbol,
-                    max_articles=100,
+                    max_articles=10,
                 )
                 
                 # Organize by date
@@ -402,6 +460,7 @@ class TradingEngine:
         df: pd.DataFrame,
         symbol: str,
         use_strategy_ensemble: bool = True,
+        use_hft_signals: bool = True,
     ) -> pd.DataFrame:
         """
         Generate trading signals.
@@ -410,6 +469,7 @@ class TradingEngine:
             df: DataFrame with features
             symbol: Stock symbol
             use_strategy_ensemble: Whether to use institutional strategy ensemble
+            use_hft_signals: Whether to include HFT strategy signals
             
         Returns:
             DataFrame with signals
@@ -435,8 +495,100 @@ class TradingEngine:
         signals = self.signal_generator.generate_signals(df, symbol=symbol)
         signals_df = self.signal_generator.signals_to_dataframe(signals)
         
-        # Enhance with strategy ensemble if enabled
-        if use_strategy_ensemble and self.strategy_ensemble:
+        # ==========================================
+        # HFT INTEGRATION: Use unified aggregator if available
+        # ==========================================
+        if use_hft_signals and self.use_hft and self.unified_aggregator:
+            try:
+                logger.info("Generating HFT-integrated unified signals...")
+                
+                unified_signals = []
+                for idx in range(len(df)):
+                    try:
+                        # Skip early rows (need history)
+                        if idx < 50:
+                            unified_signals.append({
+                                'unified_direction': 0,
+                                'unified_strength': 0,
+                                'unified_confidence': 0,
+                                'agreement_score': 0,
+                                'regime': 'unknown',
+                                'execution_path': 'standard',
+                            })
+                            continue
+                        
+                        # Generate unified signal
+                        usig = self.unified_aggregator.generate_unified_signal(
+                            df=df,
+                            symbol=symbol,
+                            current_idx=idx,
+                        )
+                        
+                        unified_signals.append({
+                            'unified_direction': usig.direction,
+                            'unified_strength': usig.strength,
+                            'unified_confidence': usig.confidence,
+                            'agreement_score': usig.agreement_score,
+                            'regime': usig.regime,
+                            'execution_path': usig.execution_path.value if hasattr(usig.execution_path, 'value') else str(usig.execution_path),
+                        })
+                    except Exception as e:
+                        unified_signals.append({
+                            'unified_direction': 0,
+                            'unified_strength': 0,
+                            'unified_confidence': 0,
+                            'agreement_score': 0,
+                            'regime': 'error',
+                            'execution_path': 'standard',
+                        })
+                
+                # Add unified signals to dataframe
+                unified_df = pd.DataFrame(unified_signals)
+                
+                signals_df = signals_df.reset_index(drop=True)
+                
+                # Align lengths - unified_df matches df, signals_df may be different
+                min_len = min(len(signals_df), len(unified_df))
+                
+                for col in unified_df.columns:
+                    signals_df[col] = unified_df[col].values[:min_len].tolist() + [0] * (len(signals_df) - min_len)
+                
+                # Create final combined signal (unified takes precedence when confident)
+                ml_signal = signals_df['signal_value'].values[:min_len]
+                unified_signal = unified_df['unified_direction'].values[:min_len] * unified_df['unified_strength'].values[:min_len]
+                unified_conf = unified_df['unified_confidence'].values[:min_len]
+                
+                # Blend: Use unified when confident, else fall back to ML
+                final_signal_part = np.where(
+                    unified_conf > 0.6,  # High confidence unified
+                    0.7 * unified_signal + 0.3 * ml_signal,
+                    0.4 * unified_signal + 0.6 * ml_signal
+                )
+                
+                # Pad to full length if needed
+                if len(signals_df) > min_len:
+                    remaining = signals_df['signal_value'].values[min_len:]
+                    final_signal = np.concatenate([final_signal_part, remaining])
+                else:
+                    final_signal = final_signal_part
+                
+                signals_df['combined_signal'] = final_signal
+                signals_df['hft_integrated'] = True
+                
+                # Stats
+                avg_agreement = unified_df['agreement_score'].mean()
+                regime_counts = unified_df['regime'].value_counts()
+                logger.info(f"✅ HFT signals integrated - Avg agreement: {avg_agreement:.1%}")
+                logger.info(f"   Market regimes: {dict(regime_counts)}")
+                
+            except Exception as e:
+                logger.warning(f"Could not integrate HFT signals: {e}")
+                signals_df['hft_integrated'] = False
+        
+        # ==========================================
+        # FALLBACK: Standard strategy ensemble integration
+        # ==========================================
+        elif use_strategy_ensemble and self.strategy_ensemble and 'combined_signal' not in signals_df.columns:
             try:
                 # Generate signals for each row
                 ensemble_results = []
@@ -736,6 +888,7 @@ class TradingEngine:
         train_model: bool = True,
         save_model: bool = True,
         plot_results: bool = True,
+        use_hft: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the complete trading pipeline.
@@ -750,6 +903,7 @@ class TradingEngine:
             train_model: Whether to train a new model
             save_model: Whether to save the trained model
             plot_results: Whether to plot backtest results
+            use_hft: Whether to enable HFT strategy integration
             
         Returns:
             Dictionary with results
@@ -795,6 +949,10 @@ class TradingEngine:
                 logger.warning("No saved model found, training new model")
                 self.train_model(df)
         
+        # Initialize HFT strategies if requested (after model is trained/loaded)
+        if use_hft and HFT_AVAILABLE:
+            self.initialize_hft(use_hft=True)
+        
         # Handle different modes
         if mode == 'walkforward':
             # Walk-forward backtesting
@@ -807,10 +965,11 @@ class TradingEngine:
                 'features': df,
                 'walkforward_result': wf_result,
                 'backtest_result': None,
+                'hft_enabled': use_hft and self.use_hft,
             }
         
-        # Generate signals
-        signals_df = self.generate_signals(df, symbol)
+        # Generate signals (will use HFT if enabled)
+        signals_df = self.generate_signals(df, symbol, use_hft_signals=use_hft)
         
         # Run backtest
         if mode == 'backtest':
@@ -839,6 +998,16 @@ class TradingEngine:
                 logger.info(f"  Dominant Strategy: {latest_signal.get('dominant_strategy', 'N/A')}")
             if 'market_regime' in signals_df.columns:
                 logger.info(f"  Market Regime: {latest_signal.get('market_regime', 'N/A')}")
+            
+            # Show HFT integration info if enabled
+            if use_hft and self.use_hft:
+                logger.info(f"\n🚀 HFT Integration Enabled:")
+                if 'unified_direction' in latest_signal:
+                    logger.info(f"  Unified Direction: {latest_signal['unified_direction']:+d}")
+                    logger.info(f"  Unified Confidence: {latest_signal['unified_confidence']:.2%}")
+                    logger.info(f"  Strategy Agreement: {latest_signal['agreement_score']:.2%}")
+                    logger.info(f"  Regime: {latest_signal['regime']}")
+                    logger.info(f"  Execution Path: {latest_signal['execution_path']}")
         
         return {
             'symbol': symbol,
@@ -847,6 +1016,7 @@ class TradingEngine:
             'features': df,
             'signals': signals_df,
             'backtest_result': result,
+            'hft_enabled': use_hft and self.use_hft,
         }
     
     def save_results(
@@ -936,6 +1106,11 @@ def main():
         action='store_true',
         help='Disable alternative data fetching'
     )
+    parser.add_argument(
+        '--hft',
+        action='store_true',
+        help='Enable HFT strategies integration (stat arb, LOB imbalance, market making)'
+    )
     
     args = parser.parse_args()
     
@@ -962,6 +1137,7 @@ def main():
         use_alternative_data=use_alt_data,
         train_model=not args.no_train,
         plot_results=not args.no_plot,
+        use_hft=args.hft,
     )
     
     if args.save_results:

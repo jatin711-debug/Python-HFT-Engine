@@ -147,7 +147,7 @@ class NewsFetcher:
     def fetch_news(
         self,
         symbol: str,
-        max_articles: int = 100,
+        max_articles: int = 10,
         days_back: int = 7,
         include_content: bool = True,
     ) -> List[NewsArticle]:
