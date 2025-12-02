@@ -10,7 +10,8 @@
 7. [Signal Generation & Position Management](#signal-generation--position-management)
 8. [Backtesting Framework](#backtesting-framework)
 9. [Risk Management](#risk-management)
-10. [Best Practices & Lessons from Institutional Trading](#best-practices--lessons-from-institutional-trading)
+10. [HFT Strategies Module](#hft-strategies-module)
+11. [Best Practices & Lessons from Institutional Trading](#best-practices--lessons-from-institutional-trading)
 
 ---
 
@@ -23,6 +24,8 @@ This trading engine is designed following principles used by **top quantitative 
 - **Sentiment analysis** from top 100 news articles per stock
 - **Robust backtesting** with walk-forward optimization
 - **Risk-adjusted position sizing** with long/short capabilities
+- **HFT-inspired strategies** (Statistical Arbitrage, LOB Imbalance, Market Making)
+- **Deep Learning for LOB** (DeepLOB CNN-LSTM architecture)
 
 ### Key Design Principles
 
@@ -33,6 +36,7 @@ This trading engine is designed following principles used by **top quantitative 
 | **Robustness** | Ensemble methods reduce single-model risk |
 | **Transparency** | Explainable predictions with SHAP values |
 | **Adaptability** | Self-learning components that adapt to market regimes |
+| **HFT-Ready** | Research-grade HFT strategies ready for C++/FPGA migration |
 
 ---
 
@@ -563,6 +567,281 @@ cvar_95 = returns[returns <= var_95].mean()
 
 # Parametric VaR
 var_parametric = returns.mean() - 1.645 * returns.std()
+```
+
+---
+
+## Best Practices & Lessons from Institutional Trading
+
+---
+
+## HFT Strategies Module
+
+### Overview
+
+The HFT module provides research-grade implementations of high-frequency trading strategies. While Python cannot achieve true HFT latencies (microseconds/nanoseconds), these implementations serve for:
+
+1. **Strategy Research & Backtesting** - Validate strategy logic before C++/FPGA implementation
+2. **Signal Generation** - Generate signals for hybrid systems (Python signals → C++ execution)
+3. **Paper Trading** - Test strategies in simulated environments
+4. **Educational Purposes** - Understand HFT algorithm mechanics
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              HFT MODULE ARCHITECTURE                                    │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                           HFT STRATEGIES LAYER                                   │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │   │
+│  │  │ Statistical │  │    LOB      │  │  Market     │  │   Technical Strategy    │  │   │
+│  │  │ Arbitrage   │  │  Imbalance  │  │  Making     │  │   Search (GA/GP)        │  │   │
+│  │  │   (EWLR)    │  │  Strategy   │  │  (ML-based) │  │                         │  │   │
+│  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └───────────┬─────────────┘  │   │
+│  └─────────┼────────────────┼────────────────┼─────────────────────┼────────────────┘   │
+│            │                │                │                     │                    │
+│            └────────────────┴────────────────┴─────────────────────┘                    │
+│                                        │                                                │
+│                                        ▼                                                │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                           DEEP LEARNING LAYER                                    │   │
+│  │  ┌─────────────────────────────────────────────────────────────────────────────┐ │   │
+│  │  │                          DeepLOB Model                                      │ │   │
+│  │  │  ┌───────────────┐   ┌───────────────┐   ┌─────────────────────────────┐    │ │   │
+│  │  │  │   Inception   │──▶│     LSTM      │──▶│   Fully Connected          │    │ │   │
+│  │  │  │   Modules     │   │    Layers     │   │   Output (3 classes)       │    │ │   │
+│  │  │  │   (CNN)       │   │               │   │   [Up, Down, Stationary]   │    │ │   │
+│  │  │  └───────────────┘   └───────────────┘   └─────────────────────────────┘    │ │   │
+│  │  └─────────────────────────────────────────────────────────────────────────────┘ │   │
+│  └──────────────────────────────────────────────────────────────────────────────────┘   │
+│                                        │                                                │
+│                                        ▼                                                │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐   │
+│  │                         RISK MANAGEMENT LAYER                                    │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │   │
+│  │  │  Pre-Trade  │  │   Kill      │  │  Position   │  │   Real-time             │  │   │
+│  │  │  Risk Check │  │   Switch    │  │   Limits    │  │   Monitoring            │  │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Strategy Implementations
+
+#### 1. Statistical Arbitrage (EWLR)
+
+Based on "High-Frequency Trading: A Practical Guide" research using Exponentially Weighted Linear Regression:
+
+```
+EWLR Formula:
+β = (X^T W X)^(-1) (X^T W Y)
+
+Where:
+- X: Price series of asset A (with intercept)
+- Y: Price series of asset B  
+- W: Diagonal matrix of exponential weights w_i = λ^(n-i)
+- λ: Decay factor (typically 0.94-0.99)
+
+Trading Signal:
+- Spread = Y - β*X
+- Z-score = (Spread - μ_spread) / σ_spread
+- Entry: |Z-score| > 2.0
+- Exit: |Z-score| < 0.5
+```
+
+**Implementation Features:**
+- Dynamic hedge ratio calculation
+- Cointegration testing (Engle-Granger)
+- Half-life estimation for mean reversion
+- Regime-aware parameter adaptation
+
+#### 2. LOB Imbalance Strategy
+
+Exploits order book microstructure for short-term price prediction:
+
+```
+Imbalance Formula:
+I_t = (Q_B - Q_A) / (Q_B + Q_A)
+
+Where:
+- Q_B: Total bid volume at top N levels
+- Q_A: Total ask volume at top N levels
+
+Weighted Version:
+I_t = Σ(w_i * q_bid_i - w_i * q_ask_i) / Σ(w_i * q_bid_i + w_i * q_ask_i)
+
+Where w_i decreases with level (e.g., [1.0, 0.8, 0.6, 0.5, ...])
+```
+
+**Predictive Power:**
+- Strong imbalance (> 0.3) → Price likely moves toward imbalance side
+- Used in conjunction with trade flow analysis
+- Decays rapidly (100-500ms prediction horizon)
+
+#### 3. Intelligent Market Making
+
+ML-enhanced market making with adverse selection protection:
+
+```
+Quote Pricing:
+- Bid = Mid - (BaseSpread/2) + InventorySkew + VolatilityAdjustment
+- Ask = Mid + (BaseSpread/2) + InventorySkew + VolatilityAdjustment
+
+Where:
+- InventorySkew = -κ * Inventory (κ = skew factor)
+- VolatilityAdjustment = σ * VolMultiplier
+
+ML Components:
+1. Random Forest for optimal spread prediction
+2. Features: volatility, imbalance, volume, time_of_day, inventory
+3. Adverseselection detection for quote adjustment
+```
+
+#### 4. DeepLOB Neural Network
+
+CNN-LSTM hybrid for price direction prediction:
+
+```
+Architecture:
+Input: LOB Snapshot (10 levels × 4 features × T timesteps)
+       ↓
+┌─────────────────────────────────┐
+│  Inception Module 1             │  → Multi-scale feature extraction
+│  (Conv1D: 1×1, 3×3, 5×5)        │  
+└─────────────────────────────────┘
+       ↓
+┌─────────────────────────────────┐
+│  Inception Module 2             │  → Higher-level patterns
+└─────────────────────────────────┘
+       ↓
+┌─────────────────────────────────┐
+│  LSTM Layer                     │  → Temporal dependencies
+│  (hidden_dim=64)                │
+└─────────────────────────────────┘
+       ↓
+┌─────────────────────────────────┐
+│  Fully Connected + Softmax      │  → 3-class output
+│  [Up, Down, Stationary]         │
+└─────────────────────────────────┘
+
+Performance (from research):
+- Accuracy: ~70% on FI-2010 dataset
+- 10-event horizon prediction
+```
+
+### Risk Management for HFT
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           HFT RISK MANAGEMENT FRAMEWORK                                 │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│  PRE-TRADE CHECKS:                                                                      │
+│  ├── Order value limit check                                                            │
+│  ├── Position limit check                                                               │
+│  ├── Daily loss limit check                                                             │
+│  ├── Order rate limit (max orders/second)                                               │
+│  ├── Symbol restriction check                                                           │
+│  └── Price reasonability check (fat finger protection)                                  │
+│                                                                                         │
+│  KILL SWITCH TRIGGERS:                                                                  │
+│  ├── Max daily loss exceeded → Halt all trading                                         │
+│  ├── Drawdown threshold breached → Reduce position sizes                                │
+│  ├── Error rate too high → Pause and alert                                              │
+│  └── Manual override capability                                                         │
+│                                                                                         │
+│  REAL-TIME MONITORING:                                                                  │
+│  ├── Portfolio VaR calculation                                                          │
+│  ├── Position concentration monitoring                                                  │
+│  ├── P&L tracking and attribution                                                       │
+│  └── Latency monitoring                                                                 │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Latency Considerations
+
+```
+Python Latency Reality Check:
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│  Component                    │  Python Latency    │  True HFT Latency                 │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│  Signal Generation            │  1-10 ms           │  1-10 μs (FPGA)                   │
+│  Risk Check                   │  0.1-1 ms          │  100-500 ns                       │
+│  Order Submission             │  10-100 ms         │  1-5 μs (kernel bypass)           │
+│  Market Data Processing       │  1-5 ms            │  100 ns - 1 μs                    │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+
+Recommended Usage:
+• Python: Research, backtesting, signal generation for lower-frequency strategies
+• C++: Production execution engine
+• FPGA: Ultra-low latency critical path
+```
+
+### Configuration
+
+```python
+# HFT Config Example (config/hft_settings.py)
+from config.hft_settings import get_hft_config
+
+config = get_hft_config("paper")  # or "backtest", "live"
+
+# Strategy settings
+config.stat_arb.entry_zscore = 2.0
+config.lob_imbalance.imbalance_threshold = 0.3
+config.market_making.base_spread_bps = 2.0
+
+# Risk settings  
+config.risk.max_daily_loss = 5000.0
+config.risk.max_position_value = 100000.0
+config.risk.kill_switch_loss_threshold = 10000.0
+
+# Validate configuration
+issues = config.validate()
+```
+
+### File Structure
+
+```
+strategies/
+├── institutional_strategies.py  # Existing strategies
+└── hft_strategies.py           # HFT strategies (NEW)
+    ├── StatisticalArbitrageStrategy
+    ├── LOBImbalanceStrategy
+    ├── IntelligentMarketMaker
+    ├── TechnicalStrategySearch
+    ├── IndexFundArbitrage
+    └── HFTStrategyEnsemble
+
+models/
+└── deep_learning/
+    └── deeplob.py              # DeepLOB CNN-LSTM (NEW)
+        ├── DeepLOBConfig
+        ├── DeepLOBModel
+        ├── DeepLOBTrainer
+        └── LOBFeatureGenerator
+
+risk/
+└── hft_risk_management.py      # HFT risk controls (NEW)
+    ├── PreTradeRiskChecker
+    ├── KillSwitch
+    ├── RiskLimitMonitor
+    └── HFTRiskManager
+
+config/
+└── hft_settings.py             # HFT configuration (NEW)
+    ├── StatArbSettings
+    ├── LOBImbalanceSettings
+    ├── MarketMakingSettings
+    ├── DeepLOBSettings
+    ├── RiskSettings
+    └── HFTConfig
+
+examples/
+└── hft_integration_example.py  # Integration demo (NEW)
 ```
 
 ---

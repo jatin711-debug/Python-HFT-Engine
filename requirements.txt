@@ -17,7 +17,16 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 catboost>=1.2.0
 
+# Deep Learning (Optional - for DeepLOB)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Transformers for NLP
 transformers>=4.30.0
+
+# Statistical Analysis (for HFT strategies)
+statsmodels>=0.14.0
+arch>=6.0.0  # GARCH models
 
 # Backtesting & Portfolio
 vectorbt>=0.26.0

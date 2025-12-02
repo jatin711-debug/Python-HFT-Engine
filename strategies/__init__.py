@@ -7,6 +7,7 @@ Includes:
 - Breakout strategies
 - Regime-switching meta-strategies
 - Strategy ensembles
+- HFT strategies (Statistical Arbitrage, LOB Imbalance, Market Making)
 """
 
 from .institutional_strategies import (
@@ -19,7 +20,19 @@ from .institutional_strategies import (
     StrategyEnsemble,
 )
 
+from .hft_strategies import (
+    HFTSignal,
+    LOBSnapshot,
+    StatisticalArbitrageEWLR,
+    OrderBookImbalanceStrategy,
+    IntelligentMarketMaker,
+    TechnicalStrategySearch,
+    IndexArbitrageStrategy,
+    HFTStrategyEnsemble,
+)
+
 __all__ = [
+    # Institutional strategies
     'StrategyType',
     'StrategySignal',
     'MomentumStrategy',
@@ -27,4 +40,13 @@ __all__ = [
     'BreakoutStrategy',
     'RegimeSwitchingStrategy',
     'StrategyEnsemble',
+    # HFT strategies
+    'HFTSignal',
+    'LOBSnapshot',
+    'StatisticalArbitrageEWLR',
+    'OrderBookImbalanceStrategy',
+    'IntelligentMarketMaker',
+    'TechnicalStrategySearch',
+    'IndexArbitrageStrategy',
+    'HFTStrategyEnsemble',
 ]
