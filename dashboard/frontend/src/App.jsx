@@ -1,8 +1,20 @@
+/**
+ * TradeEngine Dashboard - Main Application
+ * 
+ * Professional trading terminal with:
+ * - Left sidebar navigation
+ * - Top navbar with market tabs
+ * - Main chart area
+ * - Right sidebar with widgets
+ * - Dark/Light theme support
+ */
+
+import { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
-import { Activity, TrendingUp, Bitcoin } from 'lucide-react';
+import { Activity } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket';
 
-// Redux selectors and actions
+// Redux
 import {
     selectConnected,
     selectActiveSymbol,
@@ -11,17 +23,25 @@ import {
     selectGlobalStats,
     selectTrades,
     selectMarketType,
-    selectMarketOpen,
-    setMarketType,
 } from './store/tradingSlice';
+import { selectTheme, setTheme } from './store/themeSlice';
 
-// Components
-import { Header } from './components/Header';
-import { CoinTabs } from './components/CoinTabs';
-import { KPIStats } from './components/KPIStats';
+// Layout Components
+import { Navbar } from './components/layout/Navbar';
+import { Sidebar } from './components/layout/Sidebar';
+
+// Trading Components
 import { ChartSection } from './components/ChartSection';
 import { PositionsPanel } from './components/PositionsPanel';
 import { TradeHistory } from './components/TradeHistory';
+import { CoinTabs } from './components/CoinTabs';
+
+// Widget Components
+import { AccountCard } from './components/widgets/AccountCard';
+import { SignalPanel } from './components/widgets/SignalPanel';
+import { QuickTrade } from './components/widgets/QuickTrade';
+import { WatchlistWidget } from './components/widgets/WatchlistWidget';
+import { AnalyticsWidget } from './components/widgets/AnalyticsWidget';
 
 // WebSocket URLs
 const WS_URLS = {
@@ -32,9 +52,19 @@ const WS_URLS = {
 function App() {
     const dispatch = useDispatch();
 
+    // Theme
+    const theme = useSelector(selectTheme);
+
+    // Apply theme on mount and changes
+    useEffect(() => {
+        document.documentElement.setAttribute('data-theme', theme);
+    }, [theme]);
+
+    // Active view for sidebar
+    const [activeView, setActiveView] = useState('dashboard');
+
     // Redux state
     const marketType = useSelector(selectMarketType);
-    const marketOpen = useSelector(selectMarketOpen);
     const connected = useSelector(selectConnected);
     const activeSymbol = useSelector(selectActiveSymbol);
     const activeCoinData = useSelector(selectActiveCoinData);
@@ -42,136 +72,106 @@ function App() {
     const globalStats = useSelector(selectGlobalStats);
     const trades = useSelector(selectTrades);
 
-    // WebSocket connection (switches based on market type)
+    // WebSocket
     const wsUrl = WS_URLS[marketType];
     const { sendMessage } = useWebSocket(wsUrl);
-
-    // Handle market type switch
-    const handleMarketSwitch = (newMarketType) => {
-        if (newMarketType !== marketType) {
-            dispatch(setMarketType(newMarketType));
-        }
-    };
 
     // Loading state
     if (!connected || Object.keys(coins).length === 0) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-bg-primary text-gray-500">
-                <div className="flex flex-col items-center gap-4 animate-pulse">
-                    <Activity className="w-12 h-12 text-blue-500" />
-                    <p>Connecting to {marketType === 'stocks' ? 'Stock' : 'Crypto'} Trading Engine...</p>
-
-                    {/* Market Type Toggle - Always visible during loading */}
-                    <div className="flex gap-2 mt-4">
-                        <button
-                            onClick={() => handleMarketSwitch('crypto')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${marketType === 'crypto'
-                                    ? 'bg-orange-500/20 border border-orange-500 text-orange-400'
-                                    : 'bg-bg-secondary border border-gray-700 text-gray-400 hover:border-gray-500'
-                                }`}
-                        >
-                            <Bitcoin className="w-4 h-4" />
-                            Crypto
-                        </button>
-                        <button
-                            onClick={() => handleMarketSwitch('stocks')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${marketType === 'stocks'
-                                    ? 'bg-green-500/20 border border-green-500 text-green-400'
-                                    : 'bg-bg-secondary border border-gray-700 text-gray-400 hover:border-gray-500'
-                                }`}
-                        >
-                            <TrendingUp className="w-4 h-4" />
-                            Stocks
-                        </button>
+            <div className="min-h-screen flex items-center justify-center"
+                style={{ background: 'var(--bg-primary)' }}>
+                <div className="flex flex-col items-center gap-4">
+                    <div className="relative">
+                        <Activity className="w-16 h-16" style={{ color: 'var(--accent-primary)' }} />
+                        <div className="absolute inset-0 animate-ping">
+                            <Activity className="w-16 h-16 opacity-30" style={{ color: 'var(--accent-primary)' }} />
+                        </div>
                     </div>
+                    <div className="text-center">
+                        <h2 className="text-xl font-bold mb-2">TradeEngine</h2>
+                        <p style={{ color: 'var(--text-muted)' }}>
+                            Connecting to {marketType === 'stocks' ? 'Stock' : 'Crypto'} Trading Engine...
+                        </p>
+                    </div>
+
+                    {/* Theme toggle even during loading */}
+                    <button
+                        onClick={() => dispatch(setTheme(theme === 'dark' ? 'light' : 'dark'))}
+                        className="btn btn-ghost mt-4"
+                    >
+                        Switch to {theme === 'dark' ? 'Light' : 'Dark'} Mode
+                    </button>
                 </div>
             </div>
         );
     }
 
     return (
-        <div className="min-h-screen bg-bg-primary text-gray-100 p-6">
-            <div className="max-w-[1600px] mx-auto space-y-6">
-                {/* Market Type Tabs + Header + Navigation */}
-                <div className="flex flex-col gap-4">
-                    {/* Market Type Toggle */}
-                    <div className="flex items-center justify-between">
-                        <div className="flex gap-2">
-                            <button
-                                onClick={() => handleMarketSwitch('crypto')}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all font-medium ${marketType === 'crypto'
-                                        ? 'bg-orange-500/20 border-2 border-orange-500 text-orange-400'
-                                        : 'bg-bg-secondary border border-gray-700 text-gray-400 hover:border-gray-500'
-                                    }`}
-                            >
-                                <Bitcoin className="w-5 h-5" />
-                                Crypto
-                            </button>
-                            <button
-                                onClick={() => handleMarketSwitch('stocks')}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all font-medium ${marketType === 'stocks'
-                                        ? 'bg-green-500/20 border-2 border-green-500 text-green-400'
-                                        : 'bg-bg-secondary border border-gray-700 text-gray-400 hover:border-gray-500'
-                                    }`}
-                            >
-                                <TrendingUp className="w-5 h-5" />
-                                Stocks
-                                {marketType === 'stocks' && !marketOpen && (
-                                    <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">
-                                        Closed
-                                    </span>
-                                )}
-                            </button>
-                        </div>
-                        <Header connected={connected} />
+        <div className="dashboard-grid">
+            {/* Top Navbar */}
+            <Navbar />
+
+            {/* Left Sidebar */}
+            <Sidebar activeView={activeView} onViewChange={setActiveView} />
+
+            {/* Main Content Area */}
+            <main className="overflow-hidden" style={{
+                background: 'var(--bg-primary)',
+                padding: '12px',
+            }}>
+                <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {/* Asset Tabs - Fixed height */}
+                    <div style={{ flex: '0 0 auto' }}>
+                        <CoinTabs
+                            coins={Object.keys(coins)}
+                            activeSymbol={activeSymbol}
+                            sendMessage={sendMessage}
+                            data={{ coins }}
+                            marketType={marketType}
+                        />
                     </div>
 
-                    {/* Asset Tabs */}
-                    <CoinTabs
-                        coins={Object.keys(coins)}
-                        activeSymbol={activeSymbol}
-                        sendMessage={sendMessage}
-                        data={{ coins }}
-                        marketType={marketType}
-                    />
-                </div>
-
-                {/* Global Stats */}
-                <KPIStats
-                    data={{
-                        net_pnl: globalStats.netPnl,
-                        total_pnl: globalStats.totalPnl,
-                        total_fees: globalStats.totalFees,
-                        win_rate: globalStats.winRate,
-                        total_trades: globalStats.totalTrades,
-                        trades_in_window: globalStats.tradesInWindow,
-                        can_trade: globalStats.canTrade,
-                        next_trade_in: globalStats.nextTradeIn,
-                    }}
-                    activeCoinData={activeCoinData}
-                />
-
-                {/* Main Workspace */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* Left Column: Charts & History */}
-                    <div className="lg:col-span-2 space-y-6">
+                    {/* Chart - Takes remaining space minus bottom panels */}
+                    <div style={{ flex: '1 1 auto', minHeight: '250px', overflow: 'hidden' }}>
                         <ChartSection sendMessage={sendMessage} />
+                    </div>
+
+                    {/* Positions & History - Fixed 240px height */}
+                    <div style={{
+                        flex: '0 0 240px',
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: '12px',
+                    }}>
+                        <PositionsPanel
+                            activeCoinData={activeCoinData}
+                            tradeStats={{
+                                trades_in_window: globalStats.tradesInWindow,
+                                total_fees: globalStats.totalFees,
+                            }}
+                        />
                         <TradeHistory trades={trades} />
                     </div>
-
-                    {/* Right Column: Positions */}
-                    <PositionsPanel
-                        activeCoinData={activeCoinData}
-                        tradeStats={{
-                            trades_in_window: globalStats.tradesInWindow,
-                            total_fees: globalStats.totalFees,
-                        }}
-                    />
                 </div>
-            </div>
+            </main>
+
+            {/* Right Sidebar - Widgets */}
+            <aside className="right-sidebar overflow-y-auto" style={{
+                background: 'var(--bg-secondary)',
+                borderLeft: '1px solid var(--border-default)',
+                padding: '12px',
+            }}>
+                <div className="space-y-3">
+                    <AccountCard />
+                    <SignalPanel />
+                    <QuickTrade sendMessage={sendMessage} />
+                    <WatchlistWidget sendMessage={sendMessage} />
+                    <AnalyticsWidget />
+                </div>
+            </aside>
         </div>
     );
 }
 
 export default App;
-

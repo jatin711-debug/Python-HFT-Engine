@@ -7,11 +7,13 @@
 import { configureStore } from '@reduxjs/toolkit';
 import tradingReducer from './tradingSlice';
 import uiReducer from './uiSlice';
+import themeReducer from './themeSlice';
 
 export const store = configureStore({
     reducer: {
         trading: tradingReducer,
         ui: uiReducer,
+        theme: themeReducer,
     },
     middleware: (getDefaultMiddleware) =>
         getDefaultMiddleware({
@@ -21,3 +23,4 @@ export const store = configureStore({
 });
 
 export default store;
+

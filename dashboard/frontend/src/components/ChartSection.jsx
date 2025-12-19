@@ -483,7 +483,7 @@ export const ChartSection = ({ sendMessage }) => {
     }, [activeCoinData?.positions]);
 
     return (
-        <Card className="h-[450px] flex flex-col">
+        <Card className="h-full flex flex-col overflow-hidden">
             {/* Header */}
             <div className="flex justify-between items-center mb-4">
                 <div>
