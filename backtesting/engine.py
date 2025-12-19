@@ -261,6 +261,10 @@ class BacktestEngine:
         
         stats = portfolio.stats()
         
+        # Debug: Log available stats keys
+        logger.debug(f"VectorBT stats keys: {list(stats.index)}")
+        logger.debug(f"VectorBT stats values: {stats.to_dict()}")
+        
         # Get trades
         try:
             trades_df = portfolio.trades.records_readable
@@ -271,9 +275,11 @@ class BacktestEngine:
         returns = portfolio.returns()
         equity = portfolio.value()
         
-        # Drawdown analysis
+        # Drawdown analysis - drawdown() returns negative values, so take abs of min
         drawdown = portfolio.drawdown()
-        max_dd = float(drawdown.max())
+        # VectorBT drawdown is typically in [0, -1] range (negative values)
+        # We want max drawdown as a positive percentage
+        max_dd = abs(float(drawdown.min())) if len(drawdown) > 0 else 0.0
         
         # Calculate trade statistics
         if len(trades_df) > 0:
@@ -341,12 +347,34 @@ class BacktestEngine:
         except (ValueError, TypeError):
             avg_trade_duration = 0.0
         
+        # Helper function to safely get stats and handle NaN
+        def safe_get_stat(key, default=0.0):
+            val = stats.get(key, default)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                return default
+            return float(val)
+        
+        # Calculate volatility from returns if not in stats
+        stats_volatility = safe_get_stat('Annualized Volatility [%]', 0) / 100
+        if stats_volatility == 0 and len(returns) > 1:
+            # Calculate manually from returns
+            stats_volatility = float(returns.std() * np.sqrt(252))
+        
+        # Calculate annual return from returns if not in stats
+        stats_annual_return = safe_get_stat('Annualized Return [%]', 0) / 100
+        if stats_annual_return == 0 and len(returns) > 1:
+            # Calculate manually: (1 + total_return) ^ (252/days) - 1
+            total_ret = safe_get_stat('Total Return [%]', 0) / 100
+            n_days = len(returns)
+            if n_days > 0 and total_ret > -1:
+                stats_annual_return = (1 + total_ret) ** (252 / n_days) - 1
+        
         result = BacktestResult(
-            total_return=float(stats.get('Total Return [%]', 0)) / 100,
-            annual_return=float(stats.get('Annualized Return [%]', 0)) / 100,
-            sharpe_ratio=float(stats.get('Sharpe Ratio', 0)),
-            sortino_ratio=float(stats.get('Sortino Ratio', 0)),
-            calmar_ratio=float(stats.get('Calmar Ratio', 0)),
+            total_return=safe_get_stat('Total Return [%]', 0) / 100,
+            annual_return=stats_annual_return,
+            sharpe_ratio=safe_get_stat('Sharpe Ratio', 0),
+            sortino_ratio=safe_get_stat('Sortino Ratio', 0),
+            calmar_ratio=safe_get_stat('Calmar Ratio', 0),
             max_drawdown=max_dd,
             max_drawdown_duration=max_dd_duration,
             total_trades=total_trades,
@@ -357,7 +385,7 @@ class BacktestEngine:
             avg_loss=avg_loss,
             profit_factor=profit_factor,
             avg_trade_duration=avg_trade_duration,
-            volatility=float(stats.get('Annualized Volatility [%]', 0)) / 100,
+            volatility=stats_volatility,
             var_95=var_95,
             cvar_95=cvar_95,
             equity_curve=equity,
@@ -365,6 +393,9 @@ class BacktestEngine:
             daily_returns=returns,
             monthly_returns=monthly_returns,
         )
+        
+        # Debug output
+        logger.debug(f"Extracted metrics - Max DD: {max_dd:.4f}, Volatility: {stats_volatility:.4f}, Annual Return: {stats_annual_return:.4f}")
         
         return result
     

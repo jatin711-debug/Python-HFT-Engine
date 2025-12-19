@@ -21,6 +21,11 @@ Usage:
     python main.py --symbol MSFT --mode walkforward
 """
 
+# Suppress TensorFlow warnings BEFORE importing anything
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=no INFO, 2=no WARNING, 3=no ERROR
+
 import argparse
 import logging
 import sys
@@ -310,7 +315,7 @@ class TradingEngine:
                 
                 # Organize by date
                 for article in articles:
-                    date_str = article.published_at.strftime('%Y-%m-%d')
+                    date_str = article.published_date.strftime('%Y-%m-%d')
                     if date_str not in news_data:
                         news_data[date_str] = []
                     news_data[date_str].append(article.__dict__)
