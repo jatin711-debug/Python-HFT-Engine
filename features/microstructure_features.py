@@ -215,8 +215,11 @@ class MicrostructureFeatures:
         # 9. External Sentiment (if provided)
         if sentiment is not None:
             df = self._add_sentiment_features(df, sentiment)
+            
+        # 10. Technical Indicators (RSI, ADX for filtering)
+        df = self._add_technical_features(df)
         
-        # 10. Composite Signals
+        # 11. Composite Signals
         df = self._add_composite_signals(df)
         
         # Fill NaN with 0 (happens at start due to lookback)
@@ -304,7 +307,7 @@ class MicrostructureFeatures:
         )
         
         # VWAP trend
-        df['vwap_trend'] = df['vwap'].pct_change(10)
+        df['vwap_trend'] = df['vwap'].pct_change(10, fill_method=None)
         
         return df
     
@@ -456,6 +459,69 @@ class MicrostructureFeatures:
             0.3 * sentiment.trade_imbalance +
             0.3 * sentiment.whale_signal
         )
+        
+        return df
+
+    def _add_technical_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add basic technical indicators for strategy filtering."""
+        close = df['close'].values
+        high = df['high'].values
+        low = df['low'].values
+        
+        # --- RSI (14) ---
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).fillna(0)
+        loss = (-delta.where(delta < 0, 0)).fillna(0)
+        
+        avg_gain = gain.rolling(window=14, min_periods=1).mean()
+        avg_loss = loss.rolling(window=14, min_periods=1).mean()
+        
+        rs = avg_gain / avg_loss.replace(0, 1)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # --- ADX (14) ---
+        # 1. True Range
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                np.abs(high - np.roll(close, 1)),
+                np.abs(low - np.roll(close, 1))
+            )
+        )
+        
+        # 2. Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # 3. Smoothed (using simple rolling mean for speed/stability)
+        tr14 = pd.Series(tr).rolling(14).sum()
+        plus_di14 = pd.Series(plus_dm).rolling(14).sum()
+        minus_di14 = pd.Series(minus_dm).rolling(14).sum()
+        
+        plus_di = 100 * (plus_di14 / tr14.replace(0, 1))
+        minus_di = 100 * (minus_di14 / tr14.replace(0, 1))
+        
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1)
+        df['adx'] = dx.rolling(14).mean().fillna(0).values
+        
+        # --- Bollinger Bands (20, 2) ---
+        sma_20 = df['close'].rolling(window=20).mean()
+        std_20 = df['close'].rolling(window=20).std()
+        
+        df['bb_middle'] = sma_20
+        df['bb_upper'] = sma_20 + (std_20 * 2)
+        df['bb_lower'] = sma_20 - (std_20 * 2)
+        
+        # --- EMA (12, 26) ---
+        df['ema_fast'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=26, adjust=False).mean()
+        
+        # --- MACD (12, 26, 9) ---
+        df['macd'] = df['ema_fast'] - df['ema_slow']
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
         return df
     

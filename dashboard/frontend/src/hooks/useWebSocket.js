@@ -2,6 +2,7 @@
  * WebSocket Hook with Redux Integration
  * 
  * Connects to the trading server and dispatches updates to Redux store.
+ * Supports dynamic URL switching for crypto/stocks servers.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -13,6 +14,19 @@ export const useWebSocket = (url) => {
     const wsRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
     const reconnectAttempts = useRef(0);
+    const currentUrlRef = useRef(url);
+
+    const disconnect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+        dispatch(setConnected(false));
+    }, [dispatch]);
 
     const connect = useCallback(() => {
         // Clear any existing connection
@@ -20,25 +34,25 @@ export const useWebSocket = (url) => {
             wsRef.current.close();
         }
 
-        const ws = new WebSocket(url);
+        const ws = new WebSocket(currentUrlRef.current);
         wsRef.current = ws;
 
         ws.onopen = () => {
             dispatch(setConnected(true));
             reconnectAttempts.current = 0;
-            console.log('✅ WebSocket connected');
+            console.log('✅ WebSocket connected to:', currentUrlRef.current);
         };
 
         ws.onclose = () => {
             dispatch(setConnected(false));
 
-            // Exponential backoff reconnection
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000);
-            reconnectAttempts.current += 1;
-
-            console.log(`🔄 WebSocket disconnected. Reconnecting in ${delay / 1000}s...`);
-
-            reconnectTimeoutRef.current = setTimeout(connect, delay);
+            // Only reconnect if we're still supposed to be connected to this URL
+            if (wsRef.current === ws) {
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000);
+                reconnectAttempts.current += 1;
+                console.log(`🔄 WebSocket disconnected. Reconnecting in ${delay / 1000}s...`);
+                reconnectTimeoutRef.current = setTimeout(connect, delay);
+            }
         };
 
         ws.onerror = (error) => {
@@ -53,20 +67,22 @@ export const useWebSocket = (url) => {
                 console.error('Failed to parse WebSocket message:', e);
             }
         };
-    }, [url, dispatch]);
+    }, [dispatch]);
 
+    // Handle URL changes
     useEffect(() => {
+        if (url !== currentUrlRef.current) {
+            console.log('🔄 Switching WebSocket URL:', url);
+            disconnect();
+            currentUrlRef.current = url;
+            reconnectAttempts.current = 0;
+        }
         connect();
 
         return () => {
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-            }
-            if (wsRef.current) {
-                wsRef.current.close();
-            }
+            disconnect();
         };
-    }, [connect]);
+    }, [url, connect, disconnect]);
 
     const sendMessage = useCallback((msg) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -74,5 +90,6 @@ export const useWebSocket = (url) => {
         }
     }, []);
 
-    return { sendMessage };
+    return { sendMessage, disconnect };
 };
+

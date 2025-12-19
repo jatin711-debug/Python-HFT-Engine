@@ -1,5 +1,7 @@
 /**
  * Trading Slice - WebSocket data and trading state
+ * 
+ * Supports both Crypto and Stocks markets via marketType toggle.
  */
 
 import { createSlice, createSelector } from '@reduxjs/toolkit';
@@ -8,6 +10,10 @@ const initialState = {
     // Connection
     connected: false,
     lastUpdate: null,
+
+    // Market type: 'crypto' or 'stocks'
+    marketType: 'crypto',
+    marketOpen: true,  // For stocks market hours
 
     // Global stats
     totalPnl: 0,
@@ -25,10 +31,10 @@ const initialState = {
     // Active symbol
     activeSymbol: 'BTCUSDT',
 
-    // Coins data - keyed by symbol
+    // Coins/Stocks data - keyed by symbol
     coins: {},
 
-    // Recent trades (all coins)
+    // Recent trades (all coins/stocks)
     trades: [],
 };
 
@@ -61,8 +67,11 @@ const tradingSlice = createSlice({
             state.canTrade = data.can_trade;
             state.nextTradeIn = data.next_trade_in;
 
-            // Coins
-            state.coins = data.coins;
+            // Market status (for stocks)
+            state.marketOpen = data.market_open ?? true;
+
+            // Coins/Stocks - handle both 'coins' and 'stocks' keys from server
+            state.coins = data.coins || data.stocks || {};
 
             // Trades
             state.trades = data.trades;
@@ -71,6 +80,15 @@ const tradingSlice = createSlice({
         setActiveSymbol: (state, action) => {
             state.activeSymbol = action.payload;
         },
+
+        setMarketType: (state, action) => {
+            state.marketType = action.payload;
+            // Reset state when switching markets
+            state.connected = false;
+            state.coins = {};
+            state.trades = [];
+            state.activeSymbol = action.payload === 'stocks' ? 'AAPL' : 'BTCUSDT';
+        },
     },
 });
 
@@ -78,6 +96,7 @@ export const {
     setConnected,
     updateFromWebSocket,
     setActiveSymbol,
+    setMarketType,
 } = tradingSlice.actions;
 
 // Base selectors (simple property access - no memoization needed)
@@ -85,6 +104,8 @@ export const selectConnected = (state) => state.trading.connected;
 export const selectActiveSymbol = (state) => state.trading.activeSymbol;
 export const selectCoins = (state) => state.trading.coins;
 export const selectTrades = (state) => state.trading.trades;
+export const selectMarketType = (state) => state.trading.marketType;
+export const selectMarketOpen = (state) => state.trading.marketOpen;
 
 // Memoized selectors (return derived/computed values)
 export const selectActiveCoinData = createSelector(

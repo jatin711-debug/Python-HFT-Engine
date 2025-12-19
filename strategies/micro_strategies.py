@@ -172,46 +172,61 @@ class MomentumBurstStrategy:
         
         # Entry conditions
         threshold = self.config.momentum_threshold
-        vol_threshold = self.config.volume_surge_mult
+        val_threshold = self.config.volume_surge_mult
+        
+        # Get RSI if available
+        rsi = df['rsi'].iloc[idx] if 'rsi' in df.columns else 50
         
         # Long signal
         if (recent_return > threshold and 
-            vol_ratio > vol_threshold and 
+            vol_ratio > val_threshold and 
             momentum_agreement > 0.5):
+            
+            # RSI Filter: Don't buy if already overbought
+            if rsi > 75:
+                # return self._neutral_signal(current_price) # Strict block
+                # Or just reduce confidence? Let's block for now as per plan.
+                return self._neutral_signal(current_price)
             
             direction = 1
             strength = min(1.0, recent_return / (threshold * 2))
-            confidence = min(1.0, vol_ratio / (vol_threshold * 2))
+            confidence = min(1.0, vol_ratio / (val_threshold * 2))
             
             reasoning.append(f"Price burst: {recent_return*100:.2f}%")
             reasoning.append(f"Volume surge: {vol_ratio:.1f}x")
             reasoning.append(f"Momentum aligned: {momentum_agreement:.2f}")
+            reasoning.append(f"RSI: {rsi:.1f}")
         
         # Short signal
         elif (recent_return < -threshold and 
-              vol_ratio > vol_threshold and 
+              vol_ratio > val_threshold and 
               momentum_agreement < -0.5):
+            
+            # RSI Filter: Don't sell if already oversold
+            if rsi < 25:
+                return self._neutral_signal(current_price)
             
             direction = -1
             strength = min(1.0, abs(recent_return) / (threshold * 2))
-            confidence = min(1.0, vol_ratio / (vol_threshold * 2))
+            confidence = min(1.0, vol_ratio / (val_threshold * 2))
             
             reasoning.append(f"Price crash: {recent_return*100:.2f}%")
             reasoning.append(f"Volume surge: {vol_ratio:.1f}x")
             reasoning.append(f"Momentum aligned: {momentum_agreement:.2f}")
+            reasoning.append(f"RSI: {rsi:.1f}")
         
         else:
             return self._neutral_signal(current_price)
         
-        # Calculate stops
+        # Calculate stops - WIDENED for better risk management
         atr = np.mean(high[idx-10:idx] - low[idx-10:idx]) if idx >= 10 else current_price * 0.002
         
         if direction == 1:
-            stop_loss = current_price - (atr * 1.5)
-            take_profit = current_price + (atr * 3.0)  # 2:1 risk/reward
+            stop_loss = current_price - (atr * 3.0)   # Widened from 1.5x
+            take_profit = current_price + (atr * 5.0)  # Widened from 3.0x
         else:
-            stop_loss = current_price + (atr * 1.5)
-            take_profit = current_price - (atr * 3.0)
+            stop_loss = current_price + (atr * 3.0)   # Widened from 1.5x
+            take_profit = current_price - (atr * 5.0)  # Widened from 3.0x
         
         # Position sizing based on confidence
         base_size = self.config.max_position_pct if self.config.aggressive else self.config.max_position_pct * 0.5
@@ -231,6 +246,7 @@ class MomentumBurstStrategy:
                 'recent_return': recent_return,
                 'vol_ratio': vol_ratio,
                 'atr': atr,
+                'rsi': rsi,
             }
         )
     
@@ -317,7 +333,8 @@ class MicroMeanReversionStrategy:
             lagged = returns[:-1]
             current_ret = returns[1:]
             if len(lagged) == len(current_ret) and len(lagged) > 1:
-                autocorr = np.corrcoef(lagged, current_ret)[0, 1]
+                with np.errstate(invalid='ignore'):
+                    autocorr = np.corrcoef(lagged, current_ret)[0, 1]
                 if np.isnan(autocorr):
                     autocorr = 0
             else:
@@ -361,9 +378,9 @@ class MicroMeanReversionStrategy:
         else:
             return self._neutral_signal(current_price)
         
-        # Calculate stops - tighter for mean reversion
-        stop_dist = abs(deviation) * 1.5
-        target_dist = abs(deviation) * 0.7  # Target 70% reversion
+        # Calculate stops - WIDENED for better risk management
+        stop_dist = abs(deviation) * 2.5  # Widened from 1.5x
+        target_dist = abs(deviation) * 1.0  # Target full reversion (was 0.7)
         
         if direction == 1:
             stop_loss = current_price * (1 - stop_dist)
@@ -498,6 +515,12 @@ class VolatilityBreakoutStrategy:
         vol_ratio = volume[idx] / vol_avg if vol_avg > 0 else 1
         
         # Entry logic
+        adx = df['adx'].iloc[idx] if 'adx' in df.columns else 25 # Default to trending if missing
+        
+        # Filter weak trends
+        if adx < 20:
+             return self._neutral_signal(current_price)
+
         if position_in_band > 0.7 and vol_ratio > 1.3:
             # Breakout to upside
             direction = 1
@@ -507,6 +530,7 @@ class VolatilityBreakoutStrategy:
             reasoning.append("Squeeze release UP")
             reasoning.append(f"Band position: {position_in_band:.2f}")
             reasoning.append(f"Volume: {vol_ratio:.1f}x")
+            reasoning.append(f"ADX: {adx:.1f}")
         
         elif position_in_band < 0.3 and vol_ratio > 1.3:
             # Breakout to downside
@@ -517,19 +541,20 @@ class VolatilityBreakoutStrategy:
             reasoning.append("Squeeze release DOWN")
             reasoning.append(f"Band position: {position_in_band:.2f}")
             reasoning.append(f"Volume: {vol_ratio:.1f}x")
+            reasoning.append(f"ADX: {adx:.1f}")
         
         else:
             return self._neutral_signal(current_price)
         
-        # Calculate stops using ATR
+        # Calculate stops using ATR - WIDENED for better risk management
         atr = np.mean(high[idx-14:idx] - low[idx-14:idx]) if idx >= 14 else std
         
         if direction == 1:
-            stop_loss = current_price - (atr * 1.5)
-            take_profit = current_price + (atr * 3.0)
+            stop_loss = current_price - (atr * 3.0)   # Widened from 1.5x
+            take_profit = current_price + (atr * 5.0)  # Widened from 3.0x
         else:
-            stop_loss = current_price + (atr * 1.5)
-            take_profit = current_price - (atr * 3.0)
+            stop_loss = current_price + (atr * 3.0)   # Widened from 1.5x
+            take_profit = current_price - (atr * 5.0)  # Widened from 3.0x
         
         # Position sizing - larger for breakouts with momentum
         base_size = self.config.max_position_pct
@@ -550,6 +575,7 @@ class VolatilityBreakoutStrategy:
                 'avg_width': avg_bb_width,
                 'squeeze_release': squeeze_release,
                 'atr': atr,
+                'adx': adx,
             }
         )
     
@@ -645,9 +671,9 @@ class OrderFlowEdgeStrategy:
         else:
             return self._neutral_signal(current_price)
         
-        # Tight stops for scalping
-        stop_pct = 0.001  # 0.1%
-        take_pct = 0.002  # 0.2%
+        # WIDENED stops for realistic trading (was 0.1%/0.2%)
+        stop_pct = 0.003  # 0.3% = ~$264 on BTC
+        take_pct = 0.005  # 0.5% = ~$440 on BTC
         
         if direction == 1:
             stop_loss = current_price * (1 - stop_pct)
@@ -789,22 +815,45 @@ class MicroStrategyEnsemble:
                 reasoning=["No active signals"],
             )
         
-        # Check for agreement
-        directions = [sig.direction for sig in active_signals.values()]
-        agreement = len(set(directions)) == 1  # All same direction
+        # Check for agreement (STRICT MODE)
+        votes_long = [k for k,v in active_signals.items() if v.direction == 1]
+        votes_short = [k for k,v in active_signals.items() if v.direction == -1]
         
-        if agreement:
-            # Strong signal - all agree
-            return self._combine_signals(active_signals)
+        if len(votes_long) >= 2:
+            # Strong signal - Long consensus
+            long_sigs = {k: active_signals[k] for k in votes_long}
+            return self._combine_signals(long_sigs)
+            
+        elif len(votes_short) >= 2:
+            # Strong signal - Short consensus
+            short_sigs = {k: active_signals[k] for k in votes_short}
+            return self._combine_signals(short_sigs)
+            
         else:
-            # Conflicting signals - take strongest
+            # No consensus - Check for very high confidence SINGLE signal
             best_strategy = max(
                 active_signals.items(),
                 key=lambda x: x[1].strength * x[1].confidence * self.weights[x[0]]
             )
             signal = best_strategy[1]
-            signal.reasoning.append("Strongest single signal (conflict)")
-            return signal
+            
+            if signal.confidence > 0.8:
+                signal.reasoning.append("High confidence single signal")
+                return signal
+                
+            # Weak single signal - Filter out
+            price = df['close'].iloc[current_idx if current_idx != -1 else -1]
+            return MicroSignal(
+                strategy=StrategyType.MOMENTUM_BURST,
+                direction=0,
+                strength=0,
+                confidence=0,
+                entry_price=price,
+                stop_loss=price,
+                take_profit=price,
+                position_size_pct=0,
+                reasoning=["Filtered: Low confidence without agreement"],
+            )
     
     def _combine_signals(
         self,

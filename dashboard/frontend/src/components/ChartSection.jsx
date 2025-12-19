@@ -66,6 +66,16 @@ const aggregateCandles = (candles, targetTimeframe) => {
             bucket.low = Math.min(bucket.low, candle.low);
             bucket.close = candle.close;
             bucket.volume += candle.volume;
+            // For indicators, take the last value in the bucket (closest to close)
+            bucket.rsi = candle.rsi;
+            bucket.macd = candle.macd;
+            bucket.macd_signal = candle.macd_signal;
+            bucket.bb_upper = candle.bb_upper;
+            bucket.bb_middle = candle.bb_middle;
+            bucket.bb_lower = candle.bb_lower;
+            bucket.ema_fast = candle.ema_fast;
+            bucket.ema_slow = candle.ema_slow;
+            bucket.adx = candle.adx;
         }
     }
 
@@ -161,6 +171,9 @@ export const ChartSection = ({ sendMessage }) => {
                 borderColor: '#374151',
                 timeVisible: true,
                 secondsVisible: true,
+                barSpacing: 8,  // Fixed spacing between bars
+                minBarSpacing: 4,  // Minimum spacing to prevent super wide bars
+                rightOffset: 5,  // Empty space on right for new candles
             },
             handleScroll: {
                 vertTouchDrag: false,
@@ -219,18 +232,31 @@ export const ChartSection = ({ sendMessage }) => {
         };
     }, []);
 
-    // Update chart data
+    // Update chart data - key dependency on viewTimeframe to reset on change
     useEffect(() => {
         try {
             if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
-            if (!chartCandles || chartCandles.length === 0) return;
 
-            const baseDate = new Date();
-            baseDate.setHours(0, 0, 0, 0);
+            // Clear chart if no data (e.g. switching coins)
+            if (!chartCandles || chartCandles.length === 0) {
+                candleSeriesRef.current.setData([]);
+                volumeSeriesRef.current.setData([]);
+                return;
+            }
 
-            // Convert candles to chart format
+            // Use a fixed base timestamp (today at midnight) plus offsets
+            // Multiply by timeframe factor to spread candles correctly
+            const now = Math.floor(Date.now() / 1000);
+            const candleCount = chartCandles.length;
+
+            // Start time: now minus (candle count * interval seconds)
+            const intervalMap = { '1s': 1, '5s': 5, '15s': 15, '1m': 60, '5m': 300, '15m': 900 };
+            const interval = intervalMap[viewTimeframe] || 1;
+            const startTime = now - (candleCount * interval);
+
+            // Convert candles to chart format with proper spacing
             const candleData = chartCandles.map((c, i) => ({
-                time: timeToTimestamp(c?.time, baseDate) + i, // Add index to ensure unique times
+                time: startTime + (i * interval),
                 open: c?.open || 0,
                 high: c?.high || 0,
                 low: c?.low || 0,
@@ -238,7 +264,7 @@ export const ChartSection = ({ sendMessage }) => {
             }));
 
             const volumeData = chartCandles.map((c, i) => ({
-                time: timeToTimestamp(c?.time, baseDate) + i,
+                time: startTime + (i * interval),
                 value: c?.volume || 0,
                 color: (c?.close || 0) >= (c?.open || 0) ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)',
             }));
@@ -246,12 +272,49 @@ export const ChartSection = ({ sendMessage }) => {
             candleSeriesRef.current.setData(candleData);
             volumeSeriesRef.current.setData(volumeData);
 
-            // Fit content
-            chartRef.current?.timeScale().fitContent();
+            // Scroll to right to show latest candles (instead of fitContent which stretches)
+            chartRef.current?.timeScale().scrollToRealTime();
         } catch (e) {
             console.error('Chart data update error:', e);
         }
-    }, [chartCandles]);
+    }, [chartCandles, viewTimeframe]);
+
+    // Update Series Type (Candle vs Line)
+    useEffect(() => {
+        if (!chartRef.current || !candleSeriesRef.current || !chartCandles) return;
+
+        const chart = chartRef.current;
+
+        // We manage a separate lineSeries reference if needed, or just remove and add
+        // But removing/adding flickers. 'visible' is better but we have different series types.
+
+        // Simple approach: Toggle visibility if we have both, or recreate.
+        // Let's assume we mainly use candleSeriesRef. 
+        // If line, we need to add an AreaSeries and hide Candles.
+
+        if (chartType === 'line') {
+            if (!chart.lineSeries) {
+                chart.lineSeries = chart.addSeries(LineSeries, {
+                    color: '#3b82f6',
+                    lineWidth: 2,
+                });
+            }
+            const lineData = chartCandles.map(c => ({
+                time: timeToTimestamp(c.time),
+                value: c.close, // Use close price
+            })).sort((a, b) => a.time - b.time);
+
+            chart.lineSeries.setData(lineData);
+            chart.lineSeries.applyOptions({ visible: true });
+            candleSeriesRef.current.applyOptions({ visible: false });
+        } else {
+            // Candlestick
+            if (chart.lineSeries) {
+                chart.lineSeries.applyOptions({ visible: false });
+            }
+            candleSeriesRef.current.applyOptions({ visible: true });
+        }
+    }, [chartType, chartCandles]); // Re-run when data or type changes
 
     // Update indicator overlays
     useEffect(() => {
@@ -275,21 +338,21 @@ export const ChartSection = ({ sendMessage }) => {
         const baseDate = new Date();
         baseDate.setHours(0, 0, 0, 0);
 
-        // Create indicator data (use last indicator value for all points for now)
-        const createLineData = (value, color) => {
-            if (!value) return [];
+        // Create indicator data (use correct historical value)
+        const createLineData = (key) => {
             return chartCandles.map((c, i) => ({
                 time: timeToTimestamp(c.time, baseDate) + i,
-                value: value,
-            }));
+                value: c[key] || NaN,
+            })).filter(d => !isNaN(d.value));
         };
 
-        if (selectedIndicator === 'bb' && indicators.bb_middle) {
+        if (selectedIndicator === 'bb') {
             const bbUpper = chart.addSeries(LineSeries, {
                 color: '#10b981',
                 lineWidth: 1,
                 lineStyle: 2,
                 priceLineVisible: false,
+                lastValueVisible: false,
             });
             const bbMiddle = chart.addSeries(LineSeries, {
                 color: '#6b7280',
@@ -303,14 +366,14 @@ export const ChartSection = ({ sendMessage }) => {
                 priceLineVisible: false,
             });
 
-            bbUpper.setData(createLineData(indicators.bb_upper));
-            bbMiddle.setData(createLineData(indicators.bb_middle));
-            bbLower.setData(createLineData(indicators.bb_lower));
+            bbUpper.setData(createLineData('bb_upper'));
+            bbMiddle.setData(createLineData('bb_middle'));
+            bbLower.setData(createLineData('bb_lower'));
 
             indicatorSeriesRef.current = { bbUpper, bbMiddle, bbLower };
         }
 
-        if (selectedIndicator === 'ema' && indicators.ema_fast) {
+        if (selectedIndicator === 'ema') {
             const emaFast = chart.addSeries(LineSeries, {
                 color: '#3b82f6',
                 lineWidth: 2,
@@ -322,10 +385,71 @@ export const ChartSection = ({ sendMessage }) => {
                 priceLineVisible: false,
             });
 
-            emaFast.setData(createLineData(indicators.ema_fast));
-            emaSlow.setData(createLineData(indicators.ema_slow));
+            emaFast.setData(createLineData('ema_fast'));
+            emaSlow.setData(createLineData('ema_slow'));
 
             indicatorSeriesRef.current = { emaFast, emaSlow };
+        }
+
+        if (selectedIndicator === 'rsi') {
+            const rsiSeries = chart.addSeries(LineSeries, {
+                color: '#f472b6',
+                lineWidth: 2,
+                priceScaleId: 'rsi',
+                priceLineVisible: false,
+                title: 'RSI',
+            });
+
+            // Place RSI at the bottom (overlaying volume)
+            chart.priceScale('rsi').applyOptions({
+                scaleMargins: {
+                    top: 0.75,
+                    bottom: 0,
+                },
+                visible: true,
+            });
+
+            // Add 70/30 lines reference?
+            // Lightweight charts doesn't have horizontal lines except usually price lines.
+            // We can add a baseline series or just trust the user knows.
+
+            rsiSeries.setData(createLineData('rsi'));
+            indicatorSeriesRef.current = { rsiSeries };
+        }
+
+        if (selectedIndicator === 'macd') {
+            // MACD Line
+            const macdSeries = chart.addSeries(LineSeries, {
+                color: '#3b82f6',
+                lineWidth: 2,
+                priceScaleId: 'macd',
+                priceLineVisible: false,
+                title: 'MACD',
+            });
+
+            // Signal Line
+            const macdSignalSeries = chart.addSeries(LineSeries, {
+                color: '#f97316',
+                lineWidth: 2,
+                priceScaleId: 'macd',
+                priceLineVisible: false,
+                title: 'Signal',
+            });
+
+            // Histogram? (HistogramSeries)
+
+            chart.priceScale('macd').applyOptions({
+                scaleMargins: {
+                    top: 0.75,
+                    bottom: 0,
+                },
+                visible: true,
+            });
+
+            macdSeries.setData(createLineData('macd'));
+            macdSignalSeries.setData(createLineData('macd_signal'));
+
+            indicatorSeriesRef.current = { macdSeries, macdSignalSeries };
         }
     }, [selectedIndicator, activeCoinData.indicators, chartCandles]);
 
