@@ -61,7 +61,12 @@ class TradingConfig:
     # Risk
     capital: float = 500.0
     max_position_pct: float = 0.10  # 10% per position
-    min_confidence: float = 0.5
+    min_confidence: float = 0.70  # Increased from 0.5 to 0.70 (70%)
+    
+    # Trailing Stop Settings
+    trailing_stop_atr_mult: float = 1.5  # 1.5x ATR trailing distance
+    breakeven_threshold_pct: float = 0.3  # Move to breakeven after 30% to target
+    enable_trailing_stops: bool = True
 
 
 # =============================================================================
@@ -75,7 +80,7 @@ class PositionSide(str, Enum):
 
 @dataclass
 class Position:
-    """Trading position."""
+    """Trading position with trailing stop support."""
     id: str
     symbol: str
     side: PositionSide
@@ -85,6 +90,11 @@ class Position:
     stop_loss: float
     take_profit: float
     unrealized_pnl: float = 0.0
+    # Trailing stop tracking
+    highest_price: float = 0.0  # Track highest price since entry (for LONG)
+    lowest_price: float = 0.0  # Track lowest price since entry (for SHORT) - 0 means uninitialized
+    initial_stop_loss: float = 0.0  # Original stop loss before trailing
+    trailing_active: bool = False  # Whether trailing stop is active
     
     def to_dict(self):
         return {
@@ -97,6 +107,7 @@ class Position:
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'unrealized_pnl': self.unrealized_pnl,
+            'trailing_active': self.trailing_active,
         }
 
 
@@ -130,10 +141,24 @@ class CoinState:
     prices: List[float] = field(default_factory=list)
     timestamps: List[str] = field(default_factory=list)
     
+    # Auto-trading control
+    auto_trade_enabled: bool = True
+    
     # Signals
     signal_direction: str = "HOLD"
     signal_confidence: float = 0.0
     signal_strength: float = 0.0
+    
+    # Chart data (OHLCV candles) - now supports multi-timeframe
+    candles: List[dict] = field(default_factory=list)  # 1s candles (raw)
+    candles_1m: List[dict] = field(default_factory=list)  # Aggregated 1m candles
+    candles_5m: List[dict] = field(default_factory=list)  # Aggregated 5m candles
+    
+    # Indicators for visualization
+    indicators: dict = field(default_factory=dict)
+    
+    # Current ATR for trailing stops
+    current_atr: float = 0.0
 
 
 @dataclass  
@@ -257,7 +282,7 @@ class ProTradingEngine:
             except Exception as e:
                 logger.error(f"Trading error: {e}")
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)  # 3-second tick
     
     async def stop(self):
         """Stop trading."""
@@ -302,8 +327,53 @@ class ProTradingEngine:
         if len(coin.prices) >= 2:
             coin.price_change_pct = (current_price - coin.prices[0]) / coin.prices[0] * 100
         
+        # Calculate current ATR for trailing stops (14-period)
+        if len(df) >= 14:
+            high = df['high'].values
+            low = df['low'].values
+            close = df['close'].values
+            
+            # True Range calculation
+            tr_values = []
+            for i in range(1, min(15, len(df))):
+                tr = max(
+                    high[-i] - low[-i],
+                    abs(high[-i] - close[-i-1]) if i < len(close) else 0,
+                    abs(low[-i] - close[-i-1]) if i < len(close) else 0
+                )
+                tr_values.append(tr)
+            
+            coin.current_atr = sum(tr_values) / len(tr_values) if tr_values else 0
+        
+        # Build candle data (last 100 candles for chart - supports multi-timeframe aggregation)
+        candles = []
+        for i in range(max(0, len(df) - 100), len(df)):
+            candles.append({
+                'time': df.index[i].strftime('%H:%M:%S') if hasattr(df.index[i], 'strftime') else str(i),
+                'open': float(df['open'].iloc[i]),
+                'high': float(df['high'].iloc[i]),
+                'low': float(df['low'].iloc[i]),
+                'close': float(df['close'].iloc[i]),
+                'volume': float(df['volume'].iloc[i]),
+            })
+        coin.candles = candles
+        
         # Add features
         df_features = self.feature_generators[symbol].add_all_features(df)
+        
+        # Extract indicators for visualization
+        if len(df_features) > 0:
+            last_idx = len(df_features) - 1
+            coin.indicators = {
+                'rsi': float(df_features['rsi'].iloc[last_idx]) if 'rsi' in df_features else None,
+                'macd': float(df_features['macd'].iloc[last_idx]) if 'macd' in df_features else None,
+                'macd_signal': float(df_features['macd_signal'].iloc[last_idx]) if 'macd_signal' in df_features else None,
+                'bb_upper': float(df_features['bb_upper'].iloc[last_idx]) if 'bb_upper' in df_features else None,
+                'bb_middle': float(df_features['bb_middle'].iloc[last_idx]) if 'bb_middle' in df_features else None,
+                'bb_lower': float(df_features['bb_lower'].iloc[last_idx]) if 'bb_lower' in df_features else None,
+                'ema_fast': float(df_features['ema_fast'].iloc[last_idx]) if 'ema_fast' in df_features else None,
+                'ema_slow': float(df_features['ema_slow'].iloc[last_idx]) if 'ema_slow' in df_features else None,
+            }
         
         # Get sentiment
         sentiment = handler.get_sentiment(symbol, lookback_seconds=10)
@@ -324,8 +394,8 @@ class ProTradingEngine:
         # Manage existing positions
         await self._manage_positions(symbol, current_price)
         
-        # Look for new entries (if rate limit allows)
-        if self._can_open_position() and signal.direction != 0 and signal.confidence >= self.config.min_confidence:
+        # Look for new entries (if AUTO-TRADE ENABLED and rate limit allows)
+        if coin.auto_trade_enabled and self._can_open_position() and signal.direction != 0 and signal.confidence >= self.config.min_confidence:
             await self._open_position(symbol, signal, current_price)
     
     def _can_open_position(self) -> bool:
@@ -388,6 +458,33 @@ class ProTradingEngine:
         position_value = self.capital * self.config.max_position_pct
         size = position_value / price
         
+        # === FEE-AWARE PROFIT FILTER ===
+        # Calculate expected profit and fee
+        if side == PositionSide.LONG:
+            expected_profit = (signal.take_profit - price) * size
+        else:
+            expected_profit = (price - signal.take_profit) * size
+        
+        # Calculate round-trip fee
+        trade_value = price * size + signal.take_profit * size
+        round_trip_fee = trade_value * self.config.fee_rate
+        
+        # BLOCK TRADE IF PROFIT < 3x FEE
+        min_profit_required = round_trip_fee * 3.0
+        
+        if expected_profit < min_profit_required:
+            logger.warning(
+                f"❌ BLOCKED {side.value} {symbol}: Expected profit ${expected_profit:.2f} < "
+                f"Min required ${min_profit_required:.2f} (3x fee of ${round_trip_fee:.2f})"
+            )
+            return
+        
+        # Profit is adequate - proceed with trade
+        logger.info(
+            f"✅ APPROVED {side.value} {symbol}: Expected profit ${expected_profit:.2f} > "
+            f"Min required ${min_profit_required:.2f}"
+        )
+        
         position = Position(
             id=self._next_position_id(),
             symbol=symbol,
@@ -409,27 +506,73 @@ class ProTradingEngine:
         logger.info(f"Opened {side.value} {symbol} @ ${price:.2f} [{position.id}]")
     
     async def _manage_positions(self, symbol: str, current_price: float):
-        """Manage positions for a coin."""
+        """Manage positions for a coin with trailing stops."""
         positions_to_close = []
+        coin = self.coins.get(symbol)
+        atr = coin.current_atr if coin else 0
         
         for pos in self.all_positions:
             if pos.symbol != symbol:
                 continue
             
+            # Initialize tracking prices on first update
+            if pos.highest_price == 0:
+                pos.highest_price = current_price
+                pos.initial_stop_loss = pos.stop_loss
+            if pos.lowest_price == 0:
+                pos.lowest_price = current_price
+            
             # Calculate unrealized P&L
             if pos.side == PositionSide.LONG:
                 pos.unrealized_pnl = (current_price - pos.entry_price) * pos.size
+                pos.highest_price = max(pos.highest_price, current_price)
+                
+                # Calculate progress to target
+                target_distance = pos.take_profit - pos.entry_price
+                current_profit = current_price - pos.entry_price
+                progress_pct = current_profit / target_distance if target_distance > 0 else 0
+                
+                # Trailing stop logic
+                if self.config.enable_trailing_stops and atr > 0 and progress_pct > self.config.breakeven_threshold_pct:
+                    pos.trailing_active = True
+                    # Trail 1.5x ATR behind highest price
+                    trailing_stop = pos.highest_price - (atr * self.config.trailing_stop_atr_mult)
+                    # Never lower the stop, only raise it
+                    if trailing_stop > pos.stop_loss:
+                        old_stop = pos.stop_loss
+                        pos.stop_loss = trailing_stop
+                        logger.debug(f"[TRAIL] {pos.id} stop raised: ${old_stop:.2f} → ${pos.stop_loss:.2f}")
+                
                 hit_stop = current_price <= pos.stop_loss
                 hit_target = current_price >= pos.take_profit
-            else:
+                
+            else:  # SHORT
                 pos.unrealized_pnl = (pos.entry_price - current_price) * pos.size
+                pos.lowest_price = min(pos.lowest_price, current_price)
+                
+                # Calculate progress to target
+                target_distance = pos.entry_price - pos.take_profit
+                current_profit = pos.entry_price - current_price
+                progress_pct = current_profit / target_distance if target_distance > 0 else 0
+                
+                # Trailing stop logic
+                if self.config.enable_trailing_stops and atr > 0 and progress_pct > self.config.breakeven_threshold_pct:
+                    pos.trailing_active = True
+                    # Trail 1.5x ATR above lowest price
+                    trailing_stop = pos.lowest_price + (atr * self.config.trailing_stop_atr_mult)
+                    # Never raise the stop for shorts, only lower it
+                    if trailing_stop < pos.stop_loss:
+                        old_stop = pos.stop_loss
+                        pos.stop_loss = trailing_stop
+                        logger.debug(f"[TRAIL] {pos.id} stop lowered: ${old_stop:.2f} → ${pos.stop_loss:.2f}")
+                
                 hit_stop = current_price >= pos.stop_loss
                 hit_target = current_price <= pos.take_profit
             
             # Check exits
             reason = None
             if hit_stop:
-                reason = "Stop Loss"
+                reason = "Trailing Stop" if pos.trailing_active else "Stop Loss"
             elif hit_target:
                 reason = "Take Profit"
             elif (datetime.now() - pos.entry_time).seconds > 180:
@@ -506,12 +649,16 @@ class ProTradingEngine:
                 'positions': [p.to_dict() for p in coin.positions],
                 'prices': coin.prices[-50:],
                 'timestamps': coin.timestamps[-50:],
+                'candles': coin.candles,  # OHLCV data (100 candles for multi-timeframe)
+                'indicators': coin.indicators,  # Technical indicators
                 'signal_direction': coin.signal_direction,
                 'signal_confidence': coin.signal_confidence,
                 'signal_strength': coin.signal_strength,
                 'position_count': len(coin.positions),
                 'long_count': len([p for p in coin.positions if p.side == PositionSide.LONG]),
                 'short_count': len([p for p in coin.positions if p.side == PositionSide.SHORT]),
+                'auto_trade_enabled': coin.auto_trade_enabled,
+                'current_atr': coin.current_atr,  # ATR for trailing stop reference
             }
         
         return DashboardState(
@@ -614,6 +761,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     engine.set_active_coin(cmd.get('symbol', 'BTCUSDT'))
                 elif cmd.get('action') == 'add_coin':
                     await engine.add_coin(cmd.get('symbol', ''))
+                elif cmd.get('action') == 'toggle_auto_trade':
+                    symbol = cmd.get('symbol', '')
+                    if symbol in engine.coins:
+                        engine.coins[symbol].auto_trade_enabled = not engine.coins[symbol].auto_trade_enabled
+                        status = "enabled" if engine.coins[symbol].auto_trade_enabled else "disabled"
+                        logger.info(f"Auto-trade {status} for {symbol}")
             except:
                 pass
                 

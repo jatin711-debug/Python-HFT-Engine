@@ -1,43 +1,78 @@
-import { useState, useEffect, useRef } from 'react';
+/**
+ * WebSocket Hook with Redux Integration
+ * 
+ * Connects to the trading server and dispatches updates to Redux store.
+ */
+
+import { useEffect, useRef, useCallback } from 'react';
+import { useDispatch } from 'react-redux';
+import { setConnected, updateFromWebSocket } from '../store/tradingSlice';
 
 export const useWebSocket = (url) => {
-    const [data, setData] = useState(null);
-    const [connected, setConnected] = useState(false);
+    const dispatch = useDispatch();
     const wsRef = useRef(null);
+    const reconnectTimeoutRef = useRef(null);
+    const reconnectAttempts = useRef(0);
 
-    useEffect(() => {
-        const connect = () => {
-            const ws = new WebSocket(url);
-            wsRef.current = ws;
+    const connect = useCallback(() => {
+        // Clear any existing connection
+        if (wsRef.current) {
+            wsRef.current.close();
+        }
 
-            ws.onopen = () => setConnected(true);
-            ws.onclose = () => {
-                setConnected(false);
-                setTimeout(connect, 3000); // Reconnect
-            };
+        const ws = new WebSocket(url);
+        wsRef.current = ws;
 
-            ws.onmessage = (event) => {
-                try {
-                    const payload = JSON.parse(event.data);
-                    setData(payload);
-                } catch (e) {
-                    console.error(e);
-                }
-            };
+        ws.onopen = () => {
+            dispatch(setConnected(true));
+            reconnectAttempts.current = 0;
+            console.log('✅ WebSocket connected');
         };
 
+        ws.onclose = () => {
+            dispatch(setConnected(false));
+
+            // Exponential backoff reconnection
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000);
+            reconnectAttempts.current += 1;
+
+            console.log(`🔄 WebSocket disconnected. Reconnecting in ${delay / 1000}s...`);
+
+            reconnectTimeoutRef.current = setTimeout(connect, delay);
+        };
+
+        ws.onerror = (error) => {
+            console.error('❌ WebSocket error:', error);
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const payload = JSON.parse(event.data);
+                dispatch(updateFromWebSocket(payload));
+            } catch (e) {
+                console.error('Failed to parse WebSocket message:', e);
+            }
+        };
+    }, [url, dispatch]);
+
+    useEffect(() => {
         connect();
 
         return () => {
-            wsRef.current?.close();
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            if (wsRef.current) {
+                wsRef.current.close();
+            }
         };
-    }, [url]);
+    }, [connect]);
 
-    const sendMessage = (msg) => {
+    const sendMessage = useCallback((msg) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify(msg));
         }
-    };
+    }, []);
 
-    return { data, connected, sendMessage };
+    return { sendMessage };
 };
