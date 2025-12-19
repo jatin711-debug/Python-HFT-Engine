@@ -10,6 +10,11 @@ from .advanced_features import (
     OptionsFeatures,
     MacroFeatures,
 )
+from .microstructure_features import (
+    MicrostructureFeatures,
+    MicrostructureConfig,
+    create_microstructure_features,
+)
 
 __all__ = [
     'TechnicalFeatures',
@@ -18,4 +23,7 @@ __all__ = [
     'AdvancedFeatures',
     'OptionsFeatures',
     'MacroFeatures',
+    'MicrostructureFeatures',
+    'MicrostructureConfig',
+    'create_microstructure_features',
 ]

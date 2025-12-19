@@ -8,6 +8,7 @@ Includes:
 - Regime-switching meta-strategies
 - Strategy ensembles
 - HFT strategies (Statistical Arbitrage, LOB Imbalance, Market Making)
+- Micro strategies (1-5 second crypto trading)
 """
 
 from .institutional_strategies import (
@@ -31,6 +32,17 @@ from .hft_strategies import (
     HFTStrategyEnsemble,
 )
 
+from .micro_strategies import (
+    MicroSignal,
+    MicroConfig,
+    MicroStrategyEnsemble,
+    MomentumBurstStrategy,
+    MicroMeanReversionStrategy,
+    VolatilityBreakoutStrategy,
+    OrderFlowEdgeStrategy,
+    create_micro_ensemble,
+)
+
 __all__ = [
     # Institutional strategies
     'StrategyType',
@@ -49,4 +61,13 @@ __all__ = [
     'TechnicalStrategySearch',
     'IndexArbitrageStrategy',
     'HFTStrategyEnsemble',
+    # Micro strategies
+    'MicroSignal',
+    'MicroConfig',
+    'MicroStrategyEnsemble',
+    'MomentumBurstStrategy',
+    'MicroMeanReversionStrategy',
+    'VolatilityBreakoutStrategy',
+    'OrderFlowEdgeStrategy',
+    'create_micro_ensemble',
 ]
