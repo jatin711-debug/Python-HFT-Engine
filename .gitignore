@@ -3,3 +3,4 @@ models/saved
 *.log
 catboost_info/
 node_modules
+*.db
