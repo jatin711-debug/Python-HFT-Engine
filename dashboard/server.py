@@ -1,15 +1,15 @@
 """
-Crypto Trading Dashboard - Backend Server.
+Pro Crypto Trading Dashboard - Backend Server.
 
-FastAPI server that:
-1. Connects to Binance for live data
-2. Runs trading strategies
-3. Pushes updates to React dashboard via WebSocket
+Features:
+- Multiple coin support (BTC, ETH, SOL, etc.)
+- Multi-position trading (unlimited LONGs + SHORTs)
+- Trade rate limiting (max 5 new positions per 60 seconds)
+- Fee tracking
+- Real-time WebSocket updates
 
 Usage:
     python dashboard/server.py
-    
-Then open React app at http://localhost:5173
 """
 
 import asyncio
@@ -17,219 +17,380 @@ import json
 import logging
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
+from collections import deque
 from contextlib import asynccontextmanager
+from enum import Enum
 
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from data.fetchers import BinanceDataHandler, create_binance_handler
+from data.fetchers import BinanceDataHandler
 from features import MicrostructureFeatures
 from strategies import MicroStrategyEnsemble
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+@dataclass
+class TradingConfig:
+    """Trading configuration."""
+    # Rate limiting
+    max_new_positions_per_window: int = 5
+    rate_limit_window_seconds: int = 60
+    min_seconds_between_trades: int = 10
+    cooldown_after_loss_seconds: int = 30
+    
+    # Fees
+    fee_rate: float = 0.001  # 0.1% per trade
+    
+    # Position limits
+    max_positions_per_coin: int = 10
+    max_total_positions: int = 20
+    
+    # Risk
+    capital: float = 500.0
+    max_position_pct: float = 0.10  # 10% per position
+    min_confidence: float = 0.5
 
 
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
 
-@dataclass
-class DashboardState:
-    """Current state to send to dashboard."""
-    timestamp: str
-    symbol: str
-    price: float
-    price_change_pct: float
-    
-    # Position
-    position_side: str  # "LONG", "SHORT", "NONE"
-    position_entry: float
-    position_size: float
-    position_pnl: float
-    position_pnl_pct: float
-    
-    # P&L
-    total_pnl: float
-    total_pnl_pct: float
-    win_rate: float
-    trade_count: int
-    
-    # Signal
-    signal_direction: str  # "BUY", "SELL", "HOLD"
-    signal_confidence: float
-    signal_strength: float
-    
-    # Strategy signals
-    momentum_signal: float
-    mean_reversion_signal: float
-    volatility_signal: float
-    order_flow_signal: float
-    
-    # Recent prices for chart
-    prices: List[float]
-    timestamps: List[str]
-    
-    # Recent trades
-    trades: List[Dict]
+class PositionSide(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
 
 
 @dataclass
 class Position:
-    """Current trading position."""
-    side: str  # "LONG", "SHORT"
+    """Trading position."""
+    id: str
+    symbol: str
+    side: PositionSide
     entry_price: float
     size: float
     entry_time: datetime
     stop_loss: float
     take_profit: float
+    unrealized_pnl: float = 0.0
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'symbol': self.symbol,
+            'side': self.side.value,
+            'entry_price': self.entry_price,
+            'size': self.size,
+            'entry_time': self.entry_time.strftime('%H:%M:%S'),
+            'stop_loss': self.stop_loss,
+            'take_profit': self.take_profit,
+            'unrealized_pnl': self.unrealized_pnl,
+        }
 
 
 @dataclass
 class Trade:
-    """Completed trade record."""
+    """Completed trade."""
+    id: str
+    symbol: str
     side: str
     entry_price: float
     exit_price: float
     size: float
-    pnl: float
-    pnl_pct: float
+    gross_pnl: float
+    fee: float
+    net_pnl: float
     entry_time: str
     exit_time: str
     reason: str
+    
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass
+class CoinState:
+    """State for a single coin."""
+    symbol: str
+    price: float = 0.0
+    price_change_pct: float = 0.0
+    positions: List[Position] = field(default_factory=list)
+    prices: List[float] = field(default_factory=list)
+    timestamps: List[str] = field(default_factory=list)
+    
+    # Signals
+    signal_direction: str = "HOLD"
+    signal_confidence: float = 0.0
+    signal_strength: float = 0.0
+
+
+@dataclass  
+class DashboardState:
+    """Full dashboard state."""
+    timestamp: str
+    connected: bool
+    
+    # Active coin
+    active_symbol: str
+    coins: Dict[str, dict]
+    
+    # Global stats
+    total_pnl: float
+    total_fees: float
+    net_pnl: float
+    win_rate: float
+    total_trades: int
+    open_positions: int
+    
+    # Rate limiting
+    trades_in_window: int
+    can_trade: bool
+    next_trade_in: int  # seconds
+    
+    # Recent trades (all coins)
+    trades: List[dict]
 
 
 # =============================================================================
 # TRADING ENGINE
 # =============================================================================
 
-class DashboardTradingEngine:
-    """Trading engine for dashboard."""
+class ProTradingEngine:
+    """Multi-coin, multi-position trading engine."""
     
-    def __init__(self, symbol: str = "BTCUSDT", capital: float = 500.0):
-        self.symbol = symbol
-        self.capital = capital
-        self.initial_capital = capital
+    DEFAULT_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+    
+    def __init__(self, config: TradingConfig = None):
+        self.config = config or TradingConfig()
         
-        # Components
-        self.data_handler: Optional[BinanceDataHandler] = None
-        self.features: Optional[MicrostructureFeatures] = None
-        self.strategy: Optional[MicroStrategyEnsemble] = None
+        # Coins
+        self.coins: Dict[str, CoinState] = {}
+        self.active_symbol = 'BTCUSDT'
         
-        # State
-        self.position: Optional[Position] = None
-        self.trades: List[Trade] = []
-        self.prices: List[float] = []
-        self.timestamps: List[str] = []
+        # Components per coin
+        self.data_handlers: Dict[str, BinanceDataHandler] = {}
+        self.feature_generators: Dict[str, MicrostructureFeatures] = {}
+        self.strategies: Dict[str, MicroStrategyEnsemble] = {}
         
-        # Connected clients
+        # Global state
+        self.all_positions: List[Position] = []
+        self.all_trades: List[Trade] = []
+        self.total_fees: float = 0.0
+        self.capital = self.config.capital
+        
+        # Rate limiting
+        self.trade_timestamps: deque = deque(maxlen=100)
+        self.last_trade_time: Optional[datetime] = None
+        self.last_loss_time: Optional[datetime] = None
+        
+        # Position ID counter
+        self._position_id = 0
+        
+        # WebSocket clients
         self.clients: List[WebSocket] = []
-        
         self.is_running = False
     
+    def _next_position_id(self) -> str:
+        self._position_id += 1
+        return f"POS-{self._position_id:04d}"
+    
     async def initialize(self):
-        """Initialize components."""
-        logger.info(f"Initializing trading engine for {self.symbol}...")
+        """Initialize all components."""
+        logger.info("Initializing Pro Trading Engine...")
         
-        self.data_handler = BinanceDataHandler([self.symbol])
-        self.features = MicrostructureFeatures()
-        self.strategy = MicroStrategyEnsemble(capital=self.capital, aggressive=True)
+        for symbol in self.DEFAULT_COINS:
+            await self._add_coin(symbol)
         
-        # Preload historical data
-        self.data_handler.preload_historical(interval='1m', n_candles=200)
+        logger.info(f"Initialized {len(self.coins)} coins")
+    
+    async def _add_coin(self, symbol: str):
+        """Add a coin to track."""
+        if symbol in self.coins:
+            return
         
-        logger.info("Trading engine initialized")
+        self.coins[symbol] = CoinState(symbol=symbol)
+        
+        # Data handler
+        handler = BinanceDataHandler([symbol])
+        handler.preload_historical(interval='1m', n_candles=200)
+        self.data_handlers[symbol] = handler
+        
+        # Features
+        self.feature_generators[symbol] = MicrostructureFeatures()
+        
+        # Strategy
+        self.strategies[symbol] = MicroStrategyEnsemble(
+            capital=self.config.capital,
+            aggressive=True,
+        )
+        
+        logger.info(f"Added coin: {symbol}")
     
     async def start(self):
-        """Start the trading loop."""
+        """Start trading loop."""
         await self.initialize()
         
-        # Connect to Binance
-        await self.data_handler.connect()
-        await self.data_handler.subscribe_klines('1s')
-        await self.data_handler.subscribe_trades()
+        # Connect all data handlers
+        for symbol, handler in self.data_handlers.items():
+            await handler.connect()
+            await handler.subscribe_klines('1s')
+            await handler.subscribe_trades()
         
         self.is_running = True
         logger.info("Trading loop started")
         
-        # Main loop
         while self.is_running:
             try:
                 await self._trading_iteration()
             except Exception as e:
-                logger.error(f"Trading iteration error: {e}")
+                logger.error(f"Trading error: {e}")
             
-            await asyncio.sleep(5)  # Update every 5 seconds
+            await asyncio.sleep(5)
     
     async def stop(self):
-        """Stop the trading loop."""
+        """Stop trading."""
         self.is_running = False
-        if self.data_handler:
-            await self.data_handler.disconnect()
-        logger.info("Trading loop stopped")
+        for handler in self.data_handlers.values():
+            await handler.disconnect()
+        logger.info("Trading stopped")
     
     async def _trading_iteration(self):
-        """Single trading iteration."""
-        # Get candle data
-        df = self.data_handler.get_buffer(self.symbol, n_bars=100, interval='1s')
+        """Process all coins."""
+        for symbol in self.coins:
+            await self._process_coin(symbol)
         
+        # Broadcast state
+        state = self._build_state()
+        await self._broadcast(state)
+    
+    async def _process_coin(self, symbol: str):
+        """Process a single coin."""
+        handler = self.data_handlers.get(symbol)
+        if not handler:
+            return
+        
+        # Get data
+        df = handler.get_buffer(symbol, n_bars=100, interval='1s')
         if len(df) < 60:
             return
         
         current_price = df['close'].iloc[-1]
+        coin = self.coins[symbol]
         
-        # Store price history
-        self.prices.append(current_price)
-        self.timestamps.append(datetime.now().strftime('%H:%M:%S'))
+        # Update price history
+        coin.price = current_price
+        coin.prices.append(current_price)
+        coin.timestamps.append(datetime.now().strftime('%H:%M:%S'))
         
-        # Keep last 100 prices
-        if len(self.prices) > 100:
-            self.prices.pop(0)
-            self.timestamps.pop(0)
+        if len(coin.prices) > 100:
+            coin.prices.pop(0)
+            coin.timestamps.pop(0)
+        
+        # Price change
+        if len(coin.prices) >= 2:
+            coin.price_change_pct = (current_price - coin.prices[0]) / coin.prices[0] * 100
         
         # Add features
-        df_features = self.features.add_all_features(df)
+        df_features = self.feature_generators[symbol].add_all_features(df)
         
         # Get sentiment
-        sentiment = self.data_handler.get_sentiment(self.symbol, lookback_seconds=10)
+        sentiment = handler.get_sentiment(symbol, lookback_seconds=10)
         
-        # Create sentiment wrapper
         class SentimentWrapper:
             def __init__(self, s):
                 self.volume_imbalance = s.volume_imbalance
                 self.trade_imbalance = s.trade_imbalance
                 self.whale_signal = s.whale_signal
         
-        sentiment_obj = SentimentWrapper(sentiment)
-        
         # Generate signal
-        signal = self.strategy.generate_signal(df_features, sentiment_obj)
+        signal = self.strategies[symbol].generate_signal(df_features, SentimentWrapper(sentiment))
         
-        # Manage position
-        if self.position:
-            await self._manage_position(current_price)
-        elif signal.direction != 0 and signal.confidence >= 0.5:
-            await self._open_position(signal, current_price)
+        coin.signal_direction = "BUY" if signal.direction == 1 else "SELL" if signal.direction == -1 else "HOLD"
+        coin.signal_confidence = signal.confidence
+        coin.signal_strength = signal.strength
         
-        # Build and broadcast state
-        state = self._build_state(current_price, signal)
-        await self._broadcast(state)
+        # Manage existing positions
+        await self._manage_positions(symbol, current_price)
+        
+        # Look for new entries (if rate limit allows)
+        if self._can_open_position() and signal.direction != 0 and signal.confidence >= self.config.min_confidence:
+            await self._open_position(symbol, signal, current_price)
     
-    async def _open_position(self, signal, price: float):
-        """Open a new position."""
-        side = "LONG" if signal.direction == 1 else "SHORT"
-        size = self.capital * signal.position_size_pct / price
+    def _can_open_position(self) -> bool:
+        """Check if we can open a new position (rate limiting)."""
+        now = datetime.now()
         
-        self.position = Position(
+        # Check cooldown after loss
+        if self.last_loss_time:
+            cooldown_end = self.last_loss_time + timedelta(seconds=self.config.cooldown_after_loss_seconds)
+            if now < cooldown_end:
+                return False
+        
+        # Check min time between trades
+        if self.last_trade_time:
+            min_time = self.last_trade_time + timedelta(seconds=self.config.min_seconds_between_trades)
+            if now < min_time:
+                return False
+        
+        # Check rate limit window
+        window_start = now - timedelta(seconds=self.config.rate_limit_window_seconds)
+        recent_trades = [t for t in self.trade_timestamps if t > window_start]
+        
+        if len(recent_trades) >= self.config.max_new_positions_per_window:
+            return False
+        
+        # Check total positions
+        if len(self.all_positions) >= self.config.max_total_positions:
+            return False
+        
+        return True
+    
+    def _get_next_trade_in(self) -> int:
+        """Get seconds until next trade allowed."""
+        now = datetime.now()
+        
+        # Check cooldown
+        if self.last_loss_time:
+            cooldown_end = self.last_loss_time + timedelta(seconds=self.config.cooldown_after_loss_seconds)
+            if now < cooldown_end:
+                return int((cooldown_end - now).total_seconds())
+        
+        # Check min time
+        if self.last_trade_time:
+            min_time = self.last_trade_time + timedelta(seconds=self.config.min_seconds_between_trades)
+            if now < min_time:
+                return int((min_time - now).total_seconds())
+        
+        return 0
+    
+    def _trades_in_window(self) -> int:
+        """Count trades in current window."""
+        now = datetime.now()
+        window_start = now - timedelta(seconds=self.config.rate_limit_window_seconds)
+        return len([t for t in self.trade_timestamps if t > window_start])
+    
+    async def _open_position(self, symbol: str, signal, price: float):
+        """Open a new position."""
+        side = PositionSide.LONG if signal.direction == 1 else PositionSide.SHORT
+        
+        position_value = self.capital * self.config.max_position_pct
+        size = position_value / price
+        
+        position = Position(
+            id=self._next_position_id(),
+            symbol=symbol,
             side=side,
             entry_price=price,
             size=size,
@@ -238,139 +399,140 @@ class DashboardTradingEngine:
             take_profit=signal.take_profit,
         )
         
-        logger.info(f"Opened {side} position at ${price:.2f}")
-    
-    async def _manage_position(self, current_price: float):
-        """Manage existing position."""
-        pos = self.position
+        self.all_positions.append(position)
+        self.coins[symbol].positions.append(position)
         
+        # Track for rate limiting
+        self.trade_timestamps.append(datetime.now())
+        self.last_trade_time = datetime.now()
+        
+        logger.info(f"Opened {side.value} {symbol} @ ${price:.2f} [{position.id}]")
+    
+    async def _manage_positions(self, symbol: str, current_price: float):
+        """Manage positions for a coin."""
+        positions_to_close = []
+        
+        for pos in self.all_positions:
+            if pos.symbol != symbol:
+                continue
+            
+            # Calculate unrealized P&L
+            if pos.side == PositionSide.LONG:
+                pos.unrealized_pnl = (current_price - pos.entry_price) * pos.size
+                hit_stop = current_price <= pos.stop_loss
+                hit_target = current_price >= pos.take_profit
+            else:
+                pos.unrealized_pnl = (pos.entry_price - current_price) * pos.size
+                hit_stop = current_price >= pos.stop_loss
+                hit_target = current_price <= pos.take_profit
+            
+            # Check exits
+            reason = None
+            if hit_stop:
+                reason = "Stop Loss"
+            elif hit_target:
+                reason = "Take Profit"
+            elif (datetime.now() - pos.entry_time).seconds > 180:
+                reason = "Timeout"
+            
+            if reason:
+                positions_to_close.append((pos, current_price, reason))
+        
+        for pos, price, reason in positions_to_close:
+            await self._close_position(pos, price, reason)
+    
+    async def _close_position(self, pos: Position, exit_price: float, reason: str):
+        """Close a position."""
         # Calculate P&L
-        if pos.side == "LONG":
-            pnl = (current_price - pos.entry_price) * pos.size
-            hit_stop = current_price <= pos.stop_loss
-            hit_target = current_price >= pos.take_profit
+        if pos.side == PositionSide.LONG:
+            gross_pnl = (exit_price - pos.entry_price) * pos.size
         else:
-            pnl = (pos.entry_price - current_price) * pos.size
-            hit_stop = current_price >= pos.stop_loss
-            hit_target = current_price <= pos.take_profit
+            gross_pnl = (pos.entry_price - exit_price) * pos.size
         
-        # Check exits
-        reason = None
-        if hit_stop:
-            reason = "Stop Loss"
-        elif hit_target:
-            reason = "Take Profit"
-        elif (datetime.now() - pos.entry_time).seconds > 120:
-            reason = "Timeout"
+        # Calculate fee
+        trade_value = pos.entry_price * pos.size + exit_price * pos.size
+        fee = trade_value * self.config.fee_rate
+        net_pnl = gross_pnl - fee
         
-        if reason:
-            await self._close_position(current_price, reason)
-    
-    async def _close_position(self, price: float, reason: str):
-        """Close position and record trade."""
-        pos = self.position
+        # Update capital
+        self.capital += net_pnl
+        self.total_fees += fee
         
-        if pos.side == "LONG":
-            pnl = (price - pos.entry_price) * pos.size
-        else:
-            pnl = (pos.entry_price - price) * pos.size
+        # Track loss cooldown
+        if net_pnl < 0:
+            self.last_loss_time = datetime.now()
         
-        pnl_pct = pnl / (pos.entry_price * pos.size)
-        
+        # Record trade
         trade = Trade(
-            side=pos.side,
+            id=pos.id,
+            symbol=pos.symbol,
+            side=pos.side.value,
             entry_price=pos.entry_price,
-            exit_price=price,
+            exit_price=exit_price,
             size=pos.size,
-            pnl=pnl,
-            pnl_pct=pnl_pct,
+            gross_pnl=gross_pnl,
+            fee=fee,
+            net_pnl=net_pnl,
             entry_time=pos.entry_time.strftime('%H:%M:%S'),
             exit_time=datetime.now().strftime('%H:%M:%S'),
             reason=reason,
         )
+        self.all_trades.append(trade)
         
-        self.trades.append(trade)
-        self.capital += pnl
-        self.position = None
+        # Remove from positions
+        self.all_positions.remove(pos)
+        if pos in self.coins[pos.symbol].positions:
+            self.coins[pos.symbol].positions.remove(pos)
         
-        logger.info(f"Closed {pos.side} position: ${pnl:+.2f} ({reason})")
+        result = "WIN" if net_pnl > 0 else "LOSS"
+        logger.info(f"[{result}] Closed {pos.side.value} {pos.symbol} @ ${exit_price:.2f} | Net: ${net_pnl:+.2f} [{pos.id}]")
     
-    def _build_state(self, current_price: float, signal) -> DashboardState:
+    def _build_state(self) -> DashboardState:
         """Build state for dashboard."""
         # Calculate totals
-        total_pnl = self.capital - self.initial_capital
-        total_pnl_pct = total_pnl / self.initial_capital * 100
+        total_pnl = self.capital - self.config.capital
+        net_pnl = total_pnl  # Already net after fees
         
-        wins = [t for t in self.trades if t.pnl > 0]
-        win_rate = len(wins) / len(self.trades) * 100 if self.trades else 0
+        wins = [t for t in self.all_trades if t.net_pnl > 0]
+        win_rate = len(wins) / len(self.all_trades) * 100 if self.all_trades else 0
         
-        # Position info
-        if self.position:
-            pos_side = self.position.side
-            pos_entry = self.position.entry_price
-            pos_size = self.position.size
-            
-            if pos_side == "LONG":
-                pos_pnl = (current_price - pos_entry) * pos_size
-            else:
-                pos_pnl = (pos_entry - current_price) * pos_size
-            
-            pos_pnl_pct = pos_pnl / (pos_entry * pos_size) * 100
-        else:
-            pos_side = "NONE"
-            pos_entry = 0
-            pos_size = 0
-            pos_pnl = 0
-            pos_pnl_pct = 0
-        
-        # Price change
-        if len(self.prices) >= 2:
-            price_change = (current_price - self.prices[0]) / self.prices[0] * 100
-        else:
-            price_change = 0
-        
-        # Signal direction
-        if signal.direction == 1:
-            sig_dir = "BUY"
-        elif signal.direction == -1:
-            sig_dir = "SELL"
-        else:
-            sig_dir = "HOLD"
+        # Build coin states
+        coins_dict = {}
+        for symbol, coin in self.coins.items():
+            coins_dict[symbol] = {
+                'symbol': symbol,
+                'price': coin.price,
+                'price_change_pct': coin.price_change_pct,
+                'positions': [p.to_dict() for p in coin.positions],
+                'prices': coin.prices[-50:],
+                'timestamps': coin.timestamps[-50:],
+                'signal_direction': coin.signal_direction,
+                'signal_confidence': coin.signal_confidence,
+                'signal_strength': coin.signal_strength,
+                'position_count': len(coin.positions),
+                'long_count': len([p for p in coin.positions if p.side == PositionSide.LONG]),
+                'short_count': len([p for p in coin.positions if p.side == PositionSide.SHORT]),
+            }
         
         return DashboardState(
             timestamp=datetime.now().isoformat(),
-            symbol=self.symbol,
-            price=current_price,
-            price_change_pct=price_change,
-            
-            position_side=pos_side,
-            position_entry=pos_entry,
-            position_size=pos_size,
-            position_pnl=pos_pnl,
-            position_pnl_pct=pos_pnl_pct,
-            
+            connected=True,
+            active_symbol=self.active_symbol,
+            coins=coins_dict,
             total_pnl=total_pnl,
-            total_pnl_pct=total_pnl_pct,
+            total_fees=self.total_fees,
+            net_pnl=net_pnl,
             win_rate=win_rate,
-            trade_count=len(self.trades),
-            
-            signal_direction=sig_dir,
-            signal_confidence=signal.confidence,
-            signal_strength=signal.strength,
-            
-            momentum_signal=signal.metadata.get('momentum', 0) if hasattr(signal, 'metadata') else 0,
-            mean_reversion_signal=0,
-            volatility_signal=0,
-            order_flow_signal=0,
-            
-            prices=self.prices[-50:],
-            timestamps=self.timestamps[-50:],
-            
-            trades=[asdict(t) for t in self.trades[-10:]],
+            total_trades=len(self.all_trades),
+            open_positions=len(self.all_positions),
+            trades_in_window=self._trades_in_window(),
+            can_trade=self._can_open_position(),
+            next_trade_in=self._get_next_trade_in(),
+            trades=[t.to_dict() for t in self.all_trades[-20:]],
         )
     
     async def _broadcast(self, state: DashboardState):
-        """Broadcast state to all connected clients."""
+        """Send state to all clients."""
         if not self.clients:
             return
         
@@ -385,38 +547,48 @@ class DashboardTradingEngine:
         
         for client in disconnected:
             self.clients.remove(client)
+    
+    async def add_coin(self, symbol: str):
+        """Add a new coin."""
+        symbol = symbol.upper()
+        if not symbol.endswith('USDT'):
+            symbol += 'USDT'
+        
+        await self._add_coin(symbol)
+        
+        handler = self.data_handlers[symbol]
+        await handler.connect()
+        await handler.subscribe_klines('1s')
+        await handler.subscribe_trades()
+    
+    def set_active_coin(self, symbol: str):
+        """Set the active coin."""
+        if symbol in self.coins:
+            self.active_symbol = symbol
 
 
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
 
-# Global engine instance
-engine: Optional[DashboardTradingEngine] = None
+engine: Optional[ProTradingEngine] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown."""
     global engine
-    engine = DashboardTradingEngine(symbol="BTCUSDT", capital=500.0)
-    
-    # Start trading loop in background
+    engine = ProTradingEngine()
     asyncio.create_task(engine.start())
-    
     yield
-    
-    # Shutdown
     if engine:
         await engine.stop()
 
 
-app = FastAPI(title="Crypto Trading Dashboard", lifespan=lifespan)
+app = FastAPI(title="Pro Crypto Trading Dashboard", lifespan=lifespan)
 
-# CORS for React dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -425,18 +597,26 @@ app.add_middleware(
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates."""
     await websocket.accept()
     
     if engine:
         engine.clients.append(websocket)
-        logger.info(f"Client connected. Total: {len(engine.clients)}")
+        logger.info(f"Client connected ({len(engine.clients)} total)")
     
     try:
         while True:
-            # Keep connection alive, receive any commands
             data = await websocket.receive_text()
-            # Could handle commands like "START", "STOP", etc.
+            
+            # Handle commands
+            try:
+                cmd = json.loads(data)
+                if cmd.get('action') == 'set_active':
+                    engine.set_active_coin(cmd.get('symbol', 'BTCUSDT'))
+                elif cmd.get('action') == 'add_coin':
+                    await engine.add_coin(cmd.get('symbol', ''))
+            except:
+                pass
+                
     except WebSocketDisconnect:
         if engine and websocket in engine.clients:
             engine.clients.remove(websocket)
@@ -445,22 +625,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/api/status")
 async def get_status():
-    """Get current status."""
     if engine:
         return {
             "running": engine.is_running,
-            "symbol": engine.symbol,
-            "capital": engine.capital,
-            "position": engine.position.side if engine.position else None,
-            "trades": len(engine.trades),
+            "coins": list(engine.coins.keys()),
+            "positions": len(engine.all_positions),
+            "trades": len(engine.all_trades),
         }
     return {"running": False}
 
 
+@app.post("/api/add_coin/{symbol}")
+async def add_coin(symbol: str):
+    if engine:
+        await engine.add_coin(symbol)
+        return {"success": True, "symbol": symbol}
+    return {"success": False}
+
+
 if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-    )
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)

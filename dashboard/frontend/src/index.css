@@ -1,278 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-:root {
-  --bg-primary: #0a0e17;
-  --bg-secondary: #111827;
-  --bg-card: #1f2937;
-  --border: #374151;
-  --text-primary: #f9fafb;
-  --text-secondary: #9ca3af;
-  --accent: #3b82f6;
-  --success: #10b981;
-  --danger: #ef4444;
-  --warning: #f59e0b;
-}
-
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0a0e17;
+  color: #f9fafb;
   min-height: 100vh;
 }
 
-.dashboard {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 20px;
-}
-
-/* Header */
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-  padding: 16px 24px;
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-}
-
-.header h1 {
-  font-size: 24px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.symbol-badge {
-  background: var(--accent);
-  padding: 4px 12px;
-  border-radius: 6px;
-  font-size: 14px;
-}
-
-.price-display {
-  text-align: right;
-}
-
-.price-main {
-  font-size: 32px;
-  font-weight: 700;
-}
-
-.price-change {
-  font-size: 14px;
-  margin-top: 4px;
-}
-
-.price-change.positive { color: var(--success); }
-.price-change.negative { color: var(--danger); }
-
-.connection-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-}
-
-.status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-
-.status-dot.connected { background: var(--success); }
-.status-dot.disconnected { background: var(--danger); }
-
-/* Grid */
-.grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
-}
-
-/* Cards */
-.card {
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  padding: 20px;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.card-title {
-  font-size: 14px;
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
-.card-value {
-  font-size: 28px;
-  font-weight: 700;
-}
-
-.card-value.positive { color: var(--success); }
-.card-value.negative { color: var(--danger); }
-
-.card-subtitle {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 4px;
-}
-
-/* Signal Card */
-.signal-badge {
-  display: inline-block;
-  padding: 8px 20px;
-  border-radius: 8px;
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.signal-badge.buy { background: rgba(16, 185, 129, 0.2); color: var(--success); }
-.signal-badge.sell { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
-.signal-badge.hold { background: rgba(156, 163, 175, 0.2); color: var(--text-secondary); }
-
-.confidence-bar {
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
   height: 8px;
-  background: var(--bg-card);
+}
+
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
   border-radius: 4px;
-  overflow: hidden;
-  margin-top: 12px;
 }
 
-.confidence-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width 0.3s ease;
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
 }
 
-/* Chart */
-.chart-container {
-  grid-column: span 3;
-}
+/* Animations */
+@keyframes pulse-green {
 
-.chart-wrapper {
-  height: 300px;
-  margin-top: 12px;
-}
-
-/* Trades Table */
-.trades-container {
-  grid-column: span 4;
-}
-
-.trades-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 12px;
-}
-
-.trades-table th,
-.trades-table td {
-  padding: 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-
-.trades-table th {
-  color: var(--text-secondary);
-  font-weight: 500;
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.trades-table td {
-  font-size: 14px;
-}
-
-.trade-side {
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.trade-side.long { background: rgba(16, 185, 129, 0.2); color: var(--success); }
-.trade-side.short { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
-
-/* Strategy Signals */
-.strategy-signals {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.strategy-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.strategy-name {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.strategy-value {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-/* Position Card */
-.position-details {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.position-item {
-  display: flex;
-  flex-direction: column;
-}
-
-.position-label {
-  font-size: 11px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-}
-
-.position-value {
-  font-size: 16px;
-  font-weight: 600;
-  margin-top: 4px;
-}
-
-/* Responsive */
-@media (max-width: 1200px) {
-  .grid {
-    grid-template-columns: repeat(2, 1fr);
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
   }
-  .chart-container { grid-column: span 2; }
-  .trades-container { grid-column: span 2; }
+
+  50% {
+    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+  }
 }
 
-@media (max-width: 768px) {
-  .grid {
-    grid-template-columns: 1fr;
+@keyframes pulse-red {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
   }
-  .chart-container { grid-column: span 1; }
-  .trades-container { grid-column: span 1; }
+
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+}
+
+.pulse-green {
+  animation: pulse-green 2s infinite;
+}
+
+.pulse-red {
+  animation: pulse-red 2s infinite;
+}
+
+/* Glassmorphism card */
+.glass-card {
+  background: rgba(31, 41, 55, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(55, 65, 81, 0.5);
 }
